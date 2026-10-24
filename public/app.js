@@ -2009,10 +2009,10 @@ function renderTvdbCandidates(items) {
     </button>`).join('');
 }
 
-function renderTvdbPosters(items, meta) {
+function renderTvdbPosters(items, meta, { back = true } = {}) {
   tvdbStage = 'art';
   tvdbLast = meta;
-  $('#tvdbBack').hidden = false;
+  $('#tvdbBack').hidden = !back;
   if (!items.length) {
     $('#tvdbGrid').innerHTML = '<div class="cover-empty">这部作品在 TheTVDB 上还没有海报</div>';
     return;
@@ -2044,7 +2044,9 @@ async function tvdbSearchNow() {
     if (!res.ok) throw new Error(data.message || '搜索失败');
     if (!q && data.parsed?.title && $('#tvdbQuery').value.trim() === '') $('#tvdbQuery').value = data.parsed.title;
     renderTvdbCandidates(data.items || []);
-    tvdbSetHint(`识别为「${data.parsed?.title || '—'}」${data.parsed?.year ? ` ${data.parsed.year}` : ''}${data.parsed?.season ? ` 第${data.parsed.season}季` : ''} · ${(data.items || []).length} 个结果`);
+    // 中英混排的名字会被拆成多个查询词逐个试，说清楚最后是按哪个词搜到的
+    const used = !q && data.query && data.query !== (data.parsed?.title || '') ? ` · 按「${data.query}」搜到` : '';
+    tvdbSetHint(`识别为「${data.parsed?.title || '—'}」${data.parsed?.year ? ` ${data.parsed.year}` : ''}${data.parsed?.season ? ` 第${data.parsed.season}季` : ''}${used} ${(data.items || []).length} 个结果`);
   } catch (err) {
     tvdbSetHint('搜索失败');
     $('#tvdbGrid').innerHTML = `<div class="cover-empty">${esc(err.message)}</div>`;
@@ -2093,35 +2095,54 @@ $('#tvdbQuery').addEventListener('keydown', (e) => {
 $('#tvdbType').addEventListener('change', () => { if ($('#tvdbQuery').value.trim()) tvdbSearchNow(); });
 $('#tvdbBack').addEventListener('click', () => tvdbSearchNow());
 
-$('#tvdbPick').addEventListener('click', async () => {
-  if (!coverHash) return;
-  tvdbSkeleton();
-  tvdbSetHint('自动匹配中…', true);
+/**
+ * 自动匹配：只要匹配到「够像」的作品，就把它的第一张海报直接套上，不再要求人选。
+ * 没把握（分数太低 / 搜不到）时才把候选摆出来让人挑。
+ */
+let tvdbAutoBusy = false;
+async function tvdbAutoMatch({ silent = false } = {}) {
+  if (!coverHash || tvdbAutoBusy) return false;
+  const h = coverHash;
+  tvdbAutoBusy = true;
+  if (!silent) { tvdbSkeleton(); tvdbSetHint('自动匹配中…', true); }
   try {
     const res = await fetch('/__cover/tvdb/auto', {
       method: 'POST',
       headers: { 'content-type': 'application/json' },
-      body: JSON.stringify({ hash: coverHash }),
+      body: JSON.stringify({ hash: h }),
     });
     const data = await res.json().catch(() => ({}));
+    if (coverHash !== h) return false; // 弹窗已经切到别的种子
     if (!res.ok) throw new Error(data.message || '匹配失败');
-    const r = (data.results || {})[coverHash] || {};
+    const r = (data.results || {})[h] || {};
     if (r.ok) {
-      state.coverMode.set(coverHash, 'tvdb');
-      afterCoverChange();
+      state.coverMode.set(h, 'tvdb');
+      afterCoverChange(h);
       $('#coverTvdbName').textContent = `《${r.name}》`;
-      tvdbSetHint(`已匹配《${r.name}》${r.year ? ` (${r.year})` : ''} · ${r.type === 'movie' ? '电影' : '剧集'}`);
-      toast(`已匹配《${r.name}》`, 'ok');
-      return;
+      const label = `《${r.name}》${r.year ? `（${r.year}）` : ''}`;
+      // 第一张已经套上了，海报列表也铺出来——想换一张直接点，不用再搜一次
+      if (r.arts?.length) renderTvdbPosters(r.arts, { id: r.id, type: r.type, name: r.name, nameEn: r.nameEn || '', year: r.year }, { back: false });
+      tvdbSetHint(`已套用${label}的第一张海报${r.arts?.length > 1 ? `，另有 ${r.arts.length - 1} 张可点选` : ''}`);
+      toast(`已套用${label}的海报`, 'ok');
+      return true;
     }
     // 没把握就别硬套，把候选摆出来让用户自己点
     renderTvdbCandidates(r.items || []);
-    tvdbSetHint(r.items?.length ? '不敢确定是哪一部，挑一个吧' : 'TheTVDB 上没找到匹配的作品');
+    const named = r.parsed?.title ? `「${r.parsed.title}」` : '';
+    tvdbSetHint(r.items?.length
+      ? `识别为${named}，不敢确定是哪一部，挑一个吧`
+      : `TheTVDB 上没找到${named}，换个关键词试试（中英混排的名字可以只填英文）`);
+    return false;
   } catch (err) {
     tvdbSetHint('匹配失败');
     $('#tvdbGrid').innerHTML = `<div class="cover-empty">${esc(err.message)}</div>`;
+    return false;
+  } finally {
+    tvdbAutoBusy = false;
   }
-});
+}
+
+$('#tvdbPick').addEventListener('click', () => { tvdbAutoMatch(); });
 
 $('#tvdbGrid').addEventListener('click', async (e) => {
   const item = e.target.closest('.tvdb-item');
@@ -2164,7 +2185,9 @@ async function loadTvdbPanel(hash) {
       $('#coverTvdbName').textContent = `《${st.current.name}》`;
       tvdbSetHint(`当前：TheTVDB · ${st.current.type === 'movie' ? '电影' : '剧集'}${st.current.year ? ` ${st.current.year}` : ''}`);
     } else {
-      tvdbSetHint(st.parsed?.title ? `识别为「${st.parsed.title}」${st.parsed.year ? ` ${st.parsed.year}` : ''}，点「自动匹配」试试` : '—');
+      tvdbSetHint(st.parsed?.title ? `识别为「${st.parsed.title}」${st.parsed.year ? ` ${st.parsed.year}` : ''}，正在自动匹配…` : '—');
+      // 还没刮过的种子：打开就把自动匹配跑掉，命中直接套第一张海报，不命中才留候选给人挑
+      tvdbAutoMatch({ silent: true });
     }
   } catch { tvdbSetHint('—'); }
 }
