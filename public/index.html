@@ -13,7 +13,7 @@
 <link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'><rect width='32' height='32' rx='9' fill='%236c8cff'/><path d='M16 8v12m0 0l-4.5-4.5M16 20l4.5-4.5M9 24h14' stroke='white' stroke-width='2.4' stroke-linecap='round' stroke-linejoin='round' fill='none'/></svg>" />
 <!-- ?v= 是资源版本号：改 styles.css / app.js 必须同步改这里，iOS PWA 的 Service Worker
      更新不可靠，靠 URL 变化强制绕过旧缓存。sw.js 的 SHELL 列表也要同步。 -->
-<link rel="stylesheet" href="styles.css?v=20261024aq" />
+<link rel="stylesheet" href="styles.css?v=20261024ar" />
 <link rel="manifest" href="manifest.webmanifest" />
 <link rel="apple-touch-icon" href="icon-180.png" />
 <meta name="apple-mobile-web-app-title" content="qBWebUI" />
@@ -537,8 +537,8 @@
         <div class="grid-2">
           <label class="field"><span>刮削语言<em class="field-hint">译名 / 简介</em></span>
             <select id="setTvdbLang">
-              <option value="zho">中文（大陆简体）</option>
-              <option value="zhtw">中文（臺灣國語）</option>
+              <option value="zho">中文（简体优先，缺则繁体）</option>
+              <option value="zhtw">中文（臺灣繁體優先）</option>
               <option value="yue">粵語</option>
               <option value="eng">English</option>
               <option value="jpn">日本語</option>
@@ -634,6 +634,6 @@
 
 <div class="toasts" id="toasts"></div>
 
-<script type="module" src="app.js?v=20261024aq"></script>
+<script type="module" src="app.js?v=20261024ar"></script>
 </body>
 </html>
