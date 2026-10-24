@@ -1197,7 +1197,32 @@ input:checked + .checkbox::after { opacity: 1; transform: rotate(-45deg) scale(1
 .cover-pick-main { flex: 1; min-width: 0; display: flex; flex-direction: column; gap: 2px; }
 .cover-pick-main b { font-size: 12.5px; font-weight: 600; }
 .cover-pick-main small { font-size: 11px; color: var(--text-mute); line-height: 1.5; }
-.cover-pick-actions { display: flex; gap: 8px; margin-top: 6px; }
+.cover-pick-actions { display: flex; gap: 8px; margin-top: 6px; flex-wrap: wrap; }
+/* 刮削出来的候选海报：横向一排，点一张就换成它 */
+.add-arts {
+  display: flex;
+  gap: 6px;
+  margin-top: 8px;
+  padding-bottom: 2px;
+  overflow-x: auto;
+  scrollbar-width: none;
+}
+.add-arts::-webkit-scrollbar { display: none; }
+.add-art {
+  flex: 0 0 auto;
+  width: 42px;
+  aspect-ratio: 2 / 3;
+  padding: 0;
+  border: 2px solid transparent;
+  border-radius: 7px;
+  overflow: hidden;
+  background: var(--surface-2);
+  cursor: pointer;
+  transition: border-color var(--fast), transform var(--fast);
+}
+.add-art img { width: 100%; height: 100%; object-fit: cover; display: block; }
+.add-art:hover { transform: translateY(-1px); }
+.add-art.is-on { border-color: var(--accent); }
 
 /* ══════════ 遮罩 ══════════ */
 .scrim {

@@ -2588,6 +2588,8 @@ $('#addSeg').addEventListener('click', (e) => {
 $('#addFile').addEventListener('change', (e) => {
   addFiles = Array.from(e.target.files || []);
   $('#dropText').textContent = addFiles.length ? `已选择 ${addFiles.length} 个文件：${addFiles.map((f) => f.name).join('、')}` : '点击选择或拖入 .torrent 文件';
+  // 有种子名就顺手刮一次海报，用户什么都不用点
+  if (addFiles.length) scrapeAddCover({ auto: true });
 });
 
 const dz = $('#dropzone');
@@ -2598,7 +2600,17 @@ dz.addEventListener('drop', (e) => {
   if (files.length) {
     addFiles = files;
     $('#dropText').textContent = `已选择 ${files.length} 个文件：${files.map((f) => f.name).join('、')}`;
+    scrapeAddCover({ auto: true });
   }
+});
+
+// magnet 粘进来就试着刮（有 dn 才有片名，拿不到就等用户点按钮）
+$('#addUrls').addEventListener('paste', () => {
+  setTimeout(() => {
+    const v = ($('#addUrls').value || '').trim();
+    if (!/^magnet:\?/i.test(v) && !/^https?:\/\//i.test(v)) return;
+    if (!addCoverFile) scrapeAddCover({ auto: true });
+  }, 100);
 });
 
 /** 添加后轮询一会儿，找出新出现的种子哈希（qBittorrent 的 add 接口不返回 hash） */
@@ -2621,9 +2633,13 @@ async function waitNewHashes(before, timeout = 8000) {
 /* ── 添加时的封面 ─────────────────────────────────────── */
 let addCoverFile = null;
 let addCoverUrl = null;
+/* 添加框里刮到的海报：此时种子还没进 qBittorrent，没有 hash，等添加完再按 hash 落盘 */
+let addTvdb = null;
+let addTvdbBusy = false;
 
 function resetAddCover() {
   addCoverFile = null;
+  addTvdb = null;
   if (addCoverUrl) URL.revokeObjectURL(addCoverUrl);
   addCoverUrl = null;
   const box = $('#addCoverBox');
@@ -2631,9 +2647,123 @@ function resetAddCover() {
   box.innerHTML = '<svg><use href="#i-image"/></svg>';
   $('#addCoverClear').hidden = true;
   $('#addCoverHint').textContent = '可选';
+  $('#addCoverTitle').textContent = '不设置也可以';
+  $('#addCoverDesc').textContent = '默认使用种子目录里的图片，没有就显示类型图标，添加后也能随时更换';
+  $('#addScrapeLabel').textContent = '刮削封面';
+  $('#addArts').hidden = true;
+  $('#addArts').innerHTML = '';
   const input = $('#addCoverFile');
   if (input) input.value = '';
 }
+
+/* ── 添加时直接刮削：种子名 → TheTVDB 匹配 → 选海报 → 添加后自动套用 ── */
+
+/** 从待添加的内容里猜片名：.torrent 去掉后缀；magnet 取 dn，拿不到就退回网址最后一段 */
+function addNameGuess() {
+  if (addMode === 'link') {
+    const first = (($('#addUrls').value || '').split('\n').map((s) => s.trim()).filter(Boolean)[0]) || '';
+    if (!first) return '';
+    const m = /[?&]dn=([^&]*)/.exec(first);
+    if (m) {
+      try { return decodeURIComponent(m[1].replace(/\+/g, ' ')).trim(); } catch { return m[1].trim(); }
+    }
+    const tail = (first.split('/').pop() || '').replace(/\.torrent$/i, '');
+    return /^[0-9a-f]{32,40}$/i.test(tail) ? '' : tail; // 纯哈希搜不出东西
+  }
+  return (addFiles[0]?.name || '').replace(/\.torrent$/i, '');
+}
+
+function showAddPoster(image) {
+  const box = $('#addCoverBox');
+  box.innerHTML = `<img src="${esc(image)}" alt="" referrerpolicy="no-referrer" />`;
+  box.classList.add('has-img');
+}
+
+function renderAddArts(arts, current) {
+  const wrap = $('#addArts');
+  if (!arts.length) { wrap.hidden = true; wrap.innerHTML = ''; return; }
+  wrap.innerHTML = arts.map((a) => `
+    <button class="add-art ${a.image === current ? 'is-on' : ''}" type="button" data-image="${esc(a.image)}"
+      title="${esc(a.kind === 'backdrop' ? '背景图' : '海报')} · ${esc(a.lang || '—')}">
+      <img src="${esc(a.thumb || a.image)}" data-full="${esc(a.image)}" alt="" loading="lazy" decoding="async" referrerpolicy="no-referrer" />
+    </button>`).join('');
+  wrap.hidden = false;
+  for (const img of $$('#addArts img[data-full]')) {
+    img.addEventListener('error', () => {
+      if (img.dataset.full && img.src !== img.dataset.full) img.src = img.dataset.full;
+    }, { once: true });
+  }
+}
+
+/** auto = 选了文件 / 粘了链接后顺手跑，失败不弹错 */
+async function scrapeAddCover({ auto = false } = {}) {
+  if (addTvdbBusy) return;
+  if (auto && addCoverFile) return; // 已经手动选了图，别覆盖
+  // 设置里选「仅手动」时，选文件 / 粘链接不自动联网，把主动权留给「刮削封面」按钮
+  if (auto && state.tvdb.auto !== 'new') return;
+  const name = addNameGuess();
+  if (!name) {
+    if (!auto) toast(addMode === 'link' ? '先粘贴 magnet 或链接' : '先选择 .torrent 文件', 'err');
+    return;
+  }
+  if (!state.tvdb.enabled || !state.tvdb.configured) {
+    if (!auto) toast('先到「设置 → TheTVDB 刮削」里启用并填上 API Key', 'err');
+    return;
+  }
+  if (!auto && addCoverFile) resetAddCover(); // 手动点了刮削，就用刮削的替换掉自定义图
+  addTvdbBusy = true;
+  const btn = $('#addScrapeBtn');
+  btn.disabled = true;
+  $('#addScrapeLabel').textContent = '刮削中…';
+  $('#addCoverHint').textContent = '刮削中…';
+  try {
+    const res = await fetch(`/__cover/tvdb/match?name=${encodeURIComponent(name)}`);
+    const data = await res.json().catch(() => ({}));
+    if (addCoverFile) return; // 刮削期间用户改用手动选图了
+    if (!res.ok) throw new Error(data.message || '刮削失败');
+    if (!data.ok) {
+      $('#addCoverHint').textContent = '没匹配到';
+      if (!auto) {
+        toast(data.reason === 'low-score'
+          ? '没把握是哪一部，可以点「选择图片」手动设'
+          : 'TheTVDB 上没找到这部作品，可以点「选择图片」手动设', 'err');
+      }
+      return;
+    }
+    const pick = data.pick || {};
+    const arts = (data.arts || []).filter((a) => a.image);
+    const image = (arts.find((a) => a.kind === 'poster') || arts[0])?.image || pick.image || '';
+    if (!image) throw new Error('这部作品在 TheTVDB 上没有可用海报');
+    addTvdb = {
+      id: pick.id, type: pick.type, image,
+      name: pick.name || '', nameEn: pick.nameEn || '', year: pick.year || '',
+    };
+    showAddPoster(image);
+    renderAddArts(arts, image);
+    $('#addCoverTitle').textContent = `《${pick.name}》${pick.year ? ` (${pick.year})` : ''}`;
+    $('#addCoverDesc').textContent = '来自 TheTVDB，添加后自动套用；想换一张点下面任意一张';
+    $('#addCoverHint').textContent = pick.type === 'movie' ? '电影' : '剧集';
+    $('#addCoverClear').hidden = false;
+    toast(`已匹配《${pick.name}》，添加后自动套用海报`, 'ok');
+  } catch (err) {
+    $('#addCoverHint').textContent = '刮削失败';
+    if (!auto) toast(err.message, 'err');
+  } finally {
+    addTvdbBusy = false;
+    btn.disabled = false;
+    $('#addScrapeLabel').textContent = '刮削封面';
+  }
+}
+
+$('#addScrapeBtn').addEventListener('click', () => scrapeAddCover());
+$('#addArts').addEventListener('click', (e) => {
+  const item = e.target.closest('[data-image]');
+  if (!item) return;
+  const image = item.dataset.image;
+  if (addTvdb) addTvdb.image = image;
+  showAddPoster(image);
+  $$('#addArts .add-art').forEach((el) => el.classList.toggle('is-on', el === item));
+});
 
 $('#addCoverBtn').addEventListener('click', () => $('#addCoverFile').click());
 $('#addCoverFile').addEventListener('change', (e) => {
@@ -2642,6 +2772,7 @@ $('#addCoverFile').addEventListener('change', (e) => {
   if (!/^image\//.test(file.type)) { toast('请选择图片文件', 'err'); e.target.value = ''; return; }
   if (file.size > 8 * 1024 * 1024) { toast('图片请控制在 8MB 以内', 'err'); e.target.value = ''; return; }
   addCoverFile = file;
+  addTvdb = null; // 自定义图优先，刮削结果作废
   if (addCoverUrl) URL.revokeObjectURL(addCoverUrl);
   addCoverUrl = URL.createObjectURL(file);
   const box = $('#addCoverBox');
@@ -2649,6 +2780,10 @@ $('#addCoverFile').addEventListener('change', (e) => {
   box.classList.add('has-img');
   $('#addCoverClear').hidden = false;
   $('#addCoverHint').textContent = file.name;
+  $('#addCoverTitle').textContent = '自定义图片';
+  $('#addCoverDesc').textContent = '添加后按这张设置；想换回刮削的海报点「刮削封面」';
+  $('#addArts').hidden = true;
+  $('#addArts').innerHTML = '';
 });
 $('#addCoverClear').addEventListener('click', resetAddCover);
 
@@ -2695,10 +2830,12 @@ $('#addSubmit').addEventListener('click', async () => {
     toast('已添加到下载队列', 'ok');
     refreshNow();
     // 新种子一出现就把类型写进缓存（后台跑，不挡界面）；带封面时顺便等它拿到新 hash
-    const pending = (state.coverOn || addCoverFile)
+    const wantTvdb = addCoverFile ? null : addTvdb; // 手动选的图优先于刮削
+    const pending = (state.coverOn || addCoverFile || wantTvdb)
       ? waitNewHashes(before).then(async (fresh) => {
         const out = await seedKinds(fresh, { name: hintName, category: cat });
-        autoScrapeNew(fresh); // 设置里开了「自动刮削」就顺手去 TheTVDB 找海报
+        // 添加框里已经挑好海报了，就别再让「自动刮削」把它覆盖掉
+        if (!wantTvdb) autoScrapeNew(fresh);
         return out;
       })
       : null;
@@ -2711,6 +2848,36 @@ $('#addSubmit').addEventListener('click', async () => {
         const done = await Promise.all(fresh.map((h) => uploadCoverFile(h, file, true)));
         if (done.some(Boolean)) toast('封面已设置', 'ok');
         renderRows();
+      }
+      resetAddCover();
+    } else if (wantTvdb) {
+      const fresh = pending ? await pending : await waitNewHashes(before);
+      if (!fresh.length) {
+        toast('没找到刚添加的种子，海报未套用', 'err');
+      } else {
+        let done = 0;
+        for (const h of fresh) {
+          try {
+            const res = await fetch(`/__cover/tvdb/apply?hash=${h}`, {
+              method: 'POST',
+              headers: { 'content-type': 'application/json' },
+              body: JSON.stringify(wantTvdb),
+            });
+            if (!res.ok) continue;
+            done++;
+            state.coverMode.set(h, 'tvdb');
+            state.coverV.set(h, Date.now());
+            const el = rowCache.get(h);
+            if (el) el._v.coverKey = null;
+          } catch { /* 一个失败不影响其它 */ }
+        }
+        if (done) {
+          toast(`已刮削《${wantTvdb.name}》的海报`, 'ok');
+          renderRows();
+          refreshMediaTitles();
+        } else {
+          toast('海报套用失败', 'err');
+        }
       }
       resetAddCover();
     } else if (pending) {

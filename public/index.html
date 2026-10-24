@@ -13,7 +13,7 @@
 <link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'><rect width='32' height='32' rx='9' fill='%236c8cff'/><path d='M16 8v12m0 0l-4.5-4.5M16 20l4.5-4.5M9 24h14' stroke='white' stroke-width='2.4' stroke-linecap='round' stroke-linejoin='round' fill='none'/></svg>" />
 <!-- ?v= 是资源版本号：改 styles.css / app.js 必须同步改这里，iOS PWA 的 Service Worker
      更新不可靠，靠 URL 变化强制绕过旧缓存。sw.js 的 SHELL 列表也要同步。 -->
-<link rel="stylesheet" href="styles.css?v=20261024af" />
+<link rel="stylesheet" href="styles.css?v=20261024ag" />
 <link rel="manifest" href="manifest.webmanifest" />
 <link rel="apple-touch-icon" href="icon-180.png" />
 <meta name="apple-mobile-web-app-title" content="qBWebUI" />
@@ -363,15 +363,17 @@
         <div class="cover-pick">
           <div class="cover-pick-box" id="addCoverBox"><svg><use href="#i-image"/></svg></div>
           <div class="cover-pick-main">
-            <b>不设置也可以</b>
-            <small>默认使用种子目录里的图片，没有就显示类型图标，添加后也能随时更换</small>
+            <b id="addCoverTitle">不设置也可以</b>
+            <small id="addCoverDesc">默认使用种子目录里的图片，没有就显示类型图标，添加后也能随时更换</small>
             <div class="cover-pick-actions">
-              <button class="btn btn-soft btn-sm" id="addCoverBtn" type="button"><svg><use href="#i-upload"/></svg>选择图片</button>
+              <button class="btn btn-soft btn-sm" id="addScrapeBtn" type="button"><svg><use href="#i-search"/></svg><span id="addScrapeLabel">刮削封面</span></button>
+              <button class="btn btn-ghost btn-sm" id="addCoverBtn" type="button"><svg><use href="#i-upload"/></svg>选择图片</button>
               <button class="btn btn-ghost btn-sm" id="addCoverClear" type="button" hidden>移除</button>
             </div>
           </div>
           <input type="file" id="addCoverFile" accept="image/*" hidden />
         </div>
+        <div class="add-arts" id="addArts" hidden></div>
       </div>
       <div class="check-group">
         <label class="check-line"><input type="checkbox" id="addPaused" /><span class="checkbox"></span>添加后暂停</label>
@@ -616,6 +618,6 @@
 
 <div class="toasts" id="toasts"></div>
 
-<script type="module" src="app.js?v=20261024af"></script>
+<script type="module" src="app.js?v=20261024ag"></script>
 </body>
 </html>
