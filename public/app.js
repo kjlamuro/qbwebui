@@ -1977,6 +1977,9 @@ $('#coverGrid').addEventListener('click', async (e) => {
 
 let tvdbStage = 'cand'; // cand = 搜索结果；art = 某部作品的海报列表
 let tvdbLast = null;    // 当前展开的作品 { id, type, name, year }
+let tvdbItems = [];     // 上一次的搜索结果：从海报页返回时直接用，不再重新联网烧额度
+let tvdbSel = -1;       // 列表里选中的第几条（右边简介跟着它走）
+let tvdbCandHint = '';  // 搜索完成时的那句提示，返回列表时原样恢复
 
 function tvdbSetHint(text, busy = false) {
   const el = $('#coverTvdbHint');
@@ -1985,35 +1988,116 @@ function tvdbSetHint(text, busy = false) {
   el.classList.toggle('is-busy', busy);
 }
 
-function tvdbSkeleton(n = 4) {
+/** 切换「列表+简介」/「海报网格」两块，顺带把弹窗拉宽一点给双栏腾地方 */
+function tvdbShowStage(stage) {
+  const card = $('#tvdbGrid').closest('.cover-card');
+  if (card) card.classList.toggle('is-wide', stage === 'cand');
+  $('#tvdbSplit').hidden = stage !== 'cand';
+  $('#tvdbGrid').hidden = stage !== 'art';
+}
+
+function tvdbSkeleton(n = 5, stage = 'cand') {
+  tvdbStage = stage;
+  if (stage === 'cand') {
+    tvdbSel = -1;
+    tvdbItems = [];
+    $('#tvdbList').innerHTML = Array.from({ length: n }, () => '<div class="tvdb-row-skel"></div>').join('');
+    $('#tvdbSide').innerHTML = '<div class="tvdb-side-skel"></div>';
+    $('#tvdbSide').hidden = false; // 骨架屏也保持两栏，别让列表宽度跳一下
+    tvdbShowStage('cand');
+    return;
+  }
   $('#tvdbGrid').innerHTML = Array.from({ length: n }, () => '<div class="cover-skel"></div>').join('');
+  tvdbShowStage('art');
 }
 
 function tvdbDisabled(text) {
   tvdbSetHint(text);
-  $('#tvdbGrid').innerHTML = `<div class="cover-empty">${esc(text)}<br>到「设置 → TheTVDB 刮削」里填上自己的 API Key 就能用。</div>`;
+  tvdbShowStage('cand');
+  $('#tvdbSide').hidden = true;
+  $('#tvdbSide').innerHTML = '';
+  $('#tvdbList').innerHTML = `<div class="cover-empty">${esc(text)}<br>到「设置 → TheTVDB 刮削」里填上自己的 API Key 就能用。</div>`;
 }
 
-function renderTvdbCandidates(items) {
-  tvdbStage = 'cand';
-  tvdbLast = null;
-  $('#tvdbBack').hidden = true;
-  if (!items.length) {
-    $('#tvdbGrid').innerHTML = '<div class="cover-empty">TheTVDB 上没搜到，换个名字试试（可以只填英文主标题）</div>';
+/** 右边那块：大海报 + 片名 + 年份类型 + 简介 + 两个动作 */
+function tvdbRenderSide(it) {
+  const side = $('#tvdbSide');
+  if (!it) {
+    side.hidden = true;
+    side.innerHTML = '';
     return;
   }
-  $('#tvdbGrid').innerHTML = items.map((it) => `
-    <button class="cover-item tvdb-item" data-id="${esc(it.id)}" data-type="${esc(it.type)}"
-      data-name="${esc(it.name)}" data-en="${esc(it.nameEn || '')}" data-year="${esc(it.year || '')}" title="${esc(it.overview || it.name)}">
-      ${it.image ? `<img src="${esc(it.image)}" alt="" loading="lazy" decoding="async" referrerpolicy="no-referrer" />` : ''}
-      <span class="tvdb-cap"><b>${esc(it.name)}</b><small>${esc(it.type === 'movie' ? '电影' : '剧集')}${it.year ? ` · ${esc(it.year)}` : ''}${it.nameEn && it.nameEn !== it.name ? ` · ${esc(it.nameEn)}` : ''}</small></span>
+  const meta = [
+    it.type === 'movie' ? '电影' : '剧集',
+    it.year || '',
+    it.nameEn && it.nameEn !== it.name ? it.nameEn : '',
+  ].filter(Boolean).join(' · ');
+  side.hidden = false;
+  side.innerHTML = `
+    <div class="tvdb-side-pic">${it.image
+      ? `<img src="${esc(it.image)}" alt="" loading="lazy" decoding="async" referrerpolicy="no-referrer" />`
+      : '<svg><use href="#i-image"/></svg>'}</div>
+    <div class="tvdb-side-body">
+      <h3 class="tvdb-side-title">${esc(it.name)}</h3>
+      <p class="tvdb-side-meta">${esc(meta)}</p>
+      <p class="tvdb-side-desc${it.overview ? '' : ' is-empty'}">${it.overview
+        ? esc(it.overview)
+        : 'TheTVDB 上没有简介，点开海报看看对不对得上也一样。'}</p>
+      <div class="tvdb-side-acts">
+        <button class="btn btn-primary btn-sm" data-act="posters"><svg><use href="#i-image"/></svg>看它的海报</button>
+        <button class="btn btn-soft btn-sm" data-act="apply"><svg><use href="#i-check"/></svg>直接套用第一张</button>
+      </div>
+    </div>`;
+}
+
+/** 选中列表里的某一条：高亮 + 右边换成它的简介。选中的那条再点一次就进海报页 */
+function tvdbSelect(i) {
+  const it = tvdbItems[i];
+  tvdbSel = it ? i : -1;
+  for (const row of $$('#tvdbList .tvdb-row')) {
+    const on = Number(row.dataset.i) === tvdbSel;
+    row.classList.toggle('is-on', on);
+    row.setAttribute('aria-selected', String(on));
+  }
+  tvdbRenderSide(it || null);
+  // 窄屏是上下堆叠的，点了列表得把简介带进视野，不然像没反应
+  if (it && window.matchMedia('(max-width: 900px)').matches) {
+    $('#tvdbSide').scrollIntoView({ block: 'nearest', behavior: 'smooth' });
+  }
+}
+
+function renderTvdbCandidates(items, { select = 0, hint = '' } = {}) {
+  tvdbStage = 'cand';
+  tvdbLast = null;
+  tvdbItems = items;
+  $('#tvdbBack').hidden = true;
+  tvdbShowStage('cand');
+  if (hint) tvdbCandHint = hint;
+  if (!items.length) {
+    tvdbSel = -1;
+    $('#tvdbSide').hidden = true;
+    $('#tvdbSide').innerHTML = '';
+    $('#tvdbList').innerHTML = '<div class="cover-empty">TheTVDB 上没搜到，换个名字试试（可以只填英文主标题）</div>';
+    return;
+  }
+  $('#tvdbList').innerHTML = items.map((it, i) => `
+    <button class="tvdb-row" role="option" aria-selected="false" data-i="${i}">
+      <span class="tvdb-row-pic">${it.image
+        ? `<img src="${esc(it.image)}" alt="" loading="lazy" decoding="async" referrerpolicy="no-referrer" />`
+        : '<svg><use href="#i-image"/></svg>'}</span>
+      <span class="tvdb-row-txt">
+        <b>${esc(it.name)}</b>
+        <small>${esc(it.type === 'movie' ? '电影' : '剧集')}${it.year ? ` · ${esc(it.year)}` : ''}${it.nameEn && it.nameEn !== it.name ? ` · ${esc(it.nameEn)}` : ''}</small>
+      </span>
     </button>`).join('');
+  tvdbSelect(items[select] ? select : 0);
 }
 
 function renderTvdbPosters(items, meta, { back = true } = {}) {
   tvdbStage = 'art';
   tvdbLast = meta;
   $('#tvdbBack').hidden = !back;
+  tvdbShowStage('art');
   if (!items.length) {
     $('#tvdbGrid').innerHTML = '<div class="cover-empty">这部作品在 TheTVDB 上还没有海报</div>';
     return;
@@ -2044,18 +2128,22 @@ async function tvdbSearchNow() {
     if (coverHash !== h) return; // 弹窗已经切到别的种子
     if (!res.ok) throw new Error(data.message || '搜索失败');
     if (!q && data.parsed?.title && $('#tvdbQuery').value.trim() === '') $('#tvdbQuery').value = data.parsed.title;
-    renderTvdbCandidates(data.items || []);
     // 中英混排的名字会被拆成多个查询词逐个试，说清楚最后是按哪个词搜到的
     const used = data.query && data.query !== (q || data.parsed?.title || '') ? ` · 按「${data.query}」搜到` : '';
-    tvdbSetHint(`识别为「${data.parsed?.title || '—'}」${data.parsed?.year ? ` ${data.parsed.year}` : ''}${data.parsed?.season ? ` 第${data.parsed.season}季` : ''}${used} ${(data.items || []).length} 个结果`);
+    const listHint = `识别为「${data.parsed?.title || '—'}」${data.parsed?.year ? ` ${data.parsed.year}` : ''}${data.parsed?.season ? ` 第${data.parsed.season}季` : ''}${used} ${(data.items || []).length} 个结果`;
+    renderTvdbCandidates(data.items || [], { hint: listHint });
+    tvdbSetHint(listHint);
   } catch (err) {
     tvdbSetHint('搜索失败');
-    $('#tvdbGrid').innerHTML = `<div class="cover-empty">${esc(err.message)}</div>`;
+    tvdbShowStage('cand');
+    $('#tvdbSide').hidden = true;
+    $('#tvdbSide').innerHTML = '';
+    $('#tvdbList').innerHTML = `<div class="cover-empty">${esc(err.message)}</div>`;
   }
 }
 
 async function tvdbOpenArt(id, type, name, year, nameEn = '') {
-  tvdbSkeleton(6);
+  tvdbSkeleton(6, 'art');
   tvdbSetHint(`读取《${name}》的海报…`, true);
   try {
     const res = await fetch(`/__cover/tvdb/art?hash=${coverHash}&id=${encodeURIComponent(id)}&type=${encodeURIComponent(type)}`);
@@ -2065,7 +2153,37 @@ async function tvdbOpenArt(id, type, name, year, nameEn = '') {
     tvdbSetHint(`《${name}》· ${(data.items || []).length} 张可选，点一张套用`);
   } catch (err) {
     tvdbSetHint('读取失败');
+    tvdbShowStage('art');
     $('#tvdbGrid').innerHTML = `<div class="cover-empty">${esc(err.message)}</div>`;
+  }
+}
+
+/** 从海报页返回搜索结果：直接用上次的列表，不再联网重搜（TVDB 额度按请求算） */
+function tvdbBackToCandidates() {
+  if (!tvdbItems.length) { tvdbSearchNow(); return; }
+  renderTvdbCandidates(tvdbItems, { select: tvdbSel < 0 ? 0 : tvdbSel });
+  if (tvdbCandHint) tvdbSetHint(tvdbCandHint);
+}
+
+/** 右栏「直接套用第一张」：省掉进海报页那一步，取第一张非背景图的海报就套 */
+async function tvdbApplyFirst(it, btn) {
+  if (!coverHash || !it) return;
+  const h = coverHash;
+  const old = btn.innerHTML;
+  btn.disabled = true;
+  btn.innerHTML = '<svg><use href="#i-refresh"/></svg>套用中…';
+  try {
+    const res = await fetch(`/__cover/tvdb/art?hash=${h}&id=${encodeURIComponent(it.id)}&type=${encodeURIComponent(it.type)}`);
+    const data = await res.json().catch(() => ({}));
+    if (!res.ok) throw new Error(data.message || '读取海报失败');
+    const arts = data.items || [];
+    const first = arts.find((a) => a.kind !== 'backdrop') || arts[0];
+    if (!first) throw new Error('这部作品在 TheTVDB 上还没有海报');
+    await tvdbApply({ id: it.id, type: it.type, image: first.image, name: it.name, nameEn: it.nameEn || '', year: it.year });
+  } catch (err) {
+    toast(err.message, 'err');
+  } finally {
+    if (coverHash === h) { btn.disabled = false; btn.innerHTML = old; }
   }
 }
 
@@ -2094,7 +2212,27 @@ $('#tvdbQuery').addEventListener('keydown', (e) => {
   if (e.key === 'Enter') { e.preventDefault(); tvdbSearchNow(); }
 });
 $('#tvdbType').addEventListener('change', () => { if ($('#tvdbQuery').value.trim()) tvdbSearchNow(); });
-$('#tvdbBack').addEventListener('click', () => tvdbSearchNow());
+$('#tvdbBack').addEventListener('click', () => tvdbBackToCandidates());
+
+// 列表：点一下看简介，再点一下（或按右边按钮）进海报页
+$('#tvdbList').addEventListener('click', (e) => {
+  const row = e.target.closest('.tvdb-row');
+  if (!row || !coverHash) return;
+  const i = Number(row.dataset.i);
+  const it = tvdbItems[i];
+  if (!it) return;
+  if (i === tvdbSel) { tvdbOpenArt(it.id, it.type, it.name, it.year, it.nameEn); return; }
+  tvdbSelect(i);
+});
+
+$('#tvdbSide').addEventListener('click', (e) => {
+  const btn = e.target.closest('[data-act]');
+  if (!btn || !coverHash) return;
+  const it = tvdbItems[tvdbSel];
+  if (!it) return;
+  if (btn.dataset.act === 'posters') tvdbOpenArt(it.id, it.type, it.name, it.year, it.nameEn);
+  else tvdbApplyFirst(it, btn);
+});
 
 /**
  * 自动匹配：只要匹配到「够像」的作品，就把它的第一张海报直接套上，不再要求人选。
@@ -2128,16 +2266,20 @@ async function tvdbAutoMatch({ silent = false } = {}) {
       return true;
     }
     // 没把握就别硬套，把候选摆出来让用户自己点
-    renderTvdbCandidates(r.items || []);
     const named = r.parsed?.title ? `「${r.parsed.title}」` : '';
     const namedFrom = r.nameFrom === 'file' ? '（按种子里的正片文件名）' : '';
-    tvdbSetHint(r.items?.length
-      ? `识别为${named}${namedFrom}，不敢确定是哪一部，挑一个吧`
-      : `TheTVDB 上没找到${named}${namedFrom}，换个关键词试试（中英混排的名字可以只填英文）`);
+    const listHint = r.items?.length
+      ? `识别为${named}${namedFrom}，不敢确定是哪一部，挑一个看看简介`
+      : `TheTVDB 上没找到${named}${namedFrom}，换个关键词试试（中英混排的名字可以只填英文）`;
+    renderTvdbCandidates(r.items || [], { select: 0, hint: listHint });
+    tvdbSetHint(listHint);
     return false;
   } catch (err) {
     tvdbSetHint('匹配失败');
-    $('#tvdbGrid').innerHTML = `<div class="cover-empty">${esc(err.message)}</div>`;
+    tvdbShowStage('cand');
+    $('#tvdbSide').hidden = true;
+    $('#tvdbSide').innerHTML = '';
+    $('#tvdbList').innerHTML = `<div class="cover-empty">${esc(err.message)}</div>`;
     return false;
   } finally {
     tvdbAutoBusy = false;
@@ -2148,11 +2290,7 @@ $('#tvdbPick').addEventListener('click', () => { tvdbAutoMatch(); });
 
 $('#tvdbGrid').addEventListener('click', async (e) => {
   const item = e.target.closest('.tvdb-item');
-  if (!item || !coverHash) return;
-  if (tvdbStage === 'cand') {
-    tvdbOpenArt(item.dataset.id, item.dataset.type, item.dataset.name, item.dataset.year, item.dataset.en);
-    return;
-  }
+  if (!item || !coverHash || tvdbStage !== 'art') return;
   const base = tvdbLast || {};
   await tvdbApply({
     id: base.id,
@@ -2169,9 +2307,16 @@ async function loadTvdbPanel(hash) {
   const t = state.map.get(hash);
   $('#coverTvdbName').textContent = '';
   $('#tvdbGrid').innerHTML = '';
+  $('#tvdbList').innerHTML = '';
+  $('#tvdbSide').innerHTML = '';
+  $('#tvdbSide').hidden = true;
   $('#tvdbBack').hidden = true;
   tvdbStage = 'cand';
   tvdbLast = null;
+  tvdbItems = [];
+  tvdbSel = -1;
+  tvdbCandHint = '';
+  tvdbShowStage('cand');
   const h = hash;
   try {
     const st = await fetch(`/__cover/tvdb/status?hash=${hash}`).then((r) => r.json());

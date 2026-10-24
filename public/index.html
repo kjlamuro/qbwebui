@@ -13,7 +13,7 @@
 <link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'><rect width='32' height='32' rx='9' fill='%236c8cff'/><path d='M16 8v12m0 0l-4.5-4.5M16 20l4.5-4.5M9 24h14' stroke='white' stroke-width='2.4' stroke-linecap='round' stroke-linejoin='round' fill='none'/></svg>" />
 <!-- ?v= 是资源版本号：改 styles.css / app.js 必须同步改这里，iOS PWA 的 Service Worker
      更新不可靠，靠 URL 变化强制绕过旧缓存。sw.js 的 SHELL 列表也要同步。 -->
-<link rel="stylesheet" href="styles.css?v=20261024ap" />
+<link rel="stylesheet" href="styles.css?v=20261024aq" />
 <link rel="manifest" href="manifest.webmanifest" />
 <link rel="apple-touch-icon" href="icon-180.png" />
 <meta name="apple-mobile-web-app-title" content="qBWebUI" />
@@ -441,7 +441,12 @@
         <button class="btn btn-ghost btn-sm" id="tvdbBack" hidden><svg><use href="#i-chevron-down"/></svg>返回</button>
         <button class="btn btn-ghost btn-sm" id="tvdbPick"><svg><use href="#i-refresh"/></svg>自动匹配</button>
       </div>
-      <div class="cover-grid" id="tvdbGrid"></div>
+      <!-- 搜索结果：左列表、右简介；点进某部作品才切成海报网格 -->
+      <div class="tvdb-split" id="tvdbSplit" hidden>
+        <div class="tvdb-list" id="tvdbList" role="listbox" aria-label="TheTVDB 搜索结果"></div>
+        <div class="tvdb-side" id="tvdbSide" hidden></div>
+      </div>
+      <div class="cover-grid" id="tvdbGrid" hidden></div>
       <p class="hint tvdb-attr">Metadata provided by <a href="https://www.thetvdb.com" target="_blank" rel="noreferrer">TheTVDB</a> · 海报版权归各自权利人，仅限个人本地使用</p>
     </div>
   </div>
@@ -629,6 +634,6 @@
 
 <div class="toasts" id="toasts"></div>
 
-<script type="module" src="app.js?v=20261024ap"></script>
+<script type="module" src="app.js?v=20261024aq"></script>
 </body>
 </html>

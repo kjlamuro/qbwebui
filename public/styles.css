@@ -1039,6 +1039,8 @@ input:checked + .checkbox::after { opacity: 1; transform: rotate(-45deg) scale(1
 
 /* ══════════ 封面弹窗 ══════════ */
 .cover-card { width: min(620px, 100%); }
+/* 刮削结果是双栏（列表 + 简介），620px 塞不下，列表会被挤成一列「…」 */
+.cover-card.is-wide { width: min(780px, 100%); }
 .cover-top { display: flex; align-items: flex-start; gap: 14px; }
 .cover-big {
   position: relative;
@@ -1204,6 +1206,117 @@ input:checked + .checkbox::after { opacity: 1; transform: rotate(-45deg) scale(1
   white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
 }
 .tvdb-item .tvdb-cap small { font-size: 9.5px; opacity: 0.85; background: none; }
+
+/* 刮削结果：左边列表、右边简介 -------------------------------------------
+   原来的候选是海报格子，一屏只能看四五张图、看不到简介，挑起来全靠认脸。
+   改成双栏：左列表逐条列片名/年份/类型，右边跟一张大海报 + 简介。 */
+.tvdb-split {
+  display: grid;
+  grid-template-columns: minmax(0, 232px) minmax(0, 1fr);
+  align-items: start;
+  gap: 10px;
+}
+.tvdb-list {
+  display: flex; flex-direction: column; gap: 6px;
+  min-width: 0;
+  max-height: 46vh;
+  overflow-y: auto;
+  padding: 2px;
+}
+.tvdb-row {
+  flex: none;
+  display: flex; align-items: center; gap: 9px;
+  width: 100%;
+  padding: 6px 8px;
+  text-align: left;
+  font: inherit; color: inherit;
+  background: var(--surface-2);
+  border: 1px solid var(--line);
+  border-radius: 10px;
+  cursor: pointer;
+  transition: border-color var(--fast), background var(--fast);
+}
+.tvdb-row:hover { border-color: color-mix(in srgb, var(--accent) 45%, transparent); }
+.tvdb-row.is-on {
+  border-color: color-mix(in srgb, var(--accent) 70%, transparent);
+  background: color-mix(in srgb, var(--accent) 13%, var(--surface-2));
+}
+.tvdb-row-pic {
+  flex: none;
+  width: 32px;
+  aspect-ratio: 2 / 3;
+  border-radius: 6px;
+  overflow: hidden;
+  display: grid; place-items: center;
+  background: var(--surface-3);
+  color: var(--text-mute);
+}
+.tvdb-row-pic img { width: 100%; height: 100%; object-fit: cover; display: block; }
+.tvdb-row-pic svg { width: 13px; height: 13px; }
+.tvdb-row-txt { min-width: 0; display: flex; flex-direction: column; gap: 1px; }
+.tvdb-row-txt b {
+  font-size: 12px; font-weight: 600; line-height: 1.3;
+  display: -webkit-box; -webkit-box-orient: vertical; -webkit-line-clamp: 2;
+  overflow: hidden;
+}
+.tvdb-row-txt small {
+  font-size: 10px; color: var(--text-mute);
+  white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+}
+
+.tvdb-side {
+  display: flex; align-items: flex-start; gap: 12px;
+  min-width: 0;
+  max-height: 46vh;
+  padding: 10px;
+  background: var(--surface-2);
+  border: 1px solid var(--line);
+  border-radius: 12px;
+  overflow-y: auto;
+}
+.tvdb-side-pic {
+  flex: none;
+  align-self: flex-start;
+  width: 92px;
+  aspect-ratio: 2 / 3;
+  border-radius: 9px;
+  overflow: hidden;
+  display: grid; place-items: center;
+  background: var(--surface-3);
+  color: var(--text-mute);
+}
+.tvdb-side-pic img { width: 100%; height: 100%; object-fit: cover; display: block; }
+.tvdb-side-pic svg { width: 20px; height: 20px; }
+.tvdb-side-body { flex: 1; min-width: 0; display: flex; flex-direction: column; gap: 4px; }
+.tvdb-side-title { margin: 0; font-size: 13px; font-weight: 600; line-height: 1.35; overflow-wrap: anywhere; }
+.tvdb-side-meta { margin: 0; font-size: 10.5px; color: var(--text-mute); }
+.tvdb-side-desc {
+  margin: 2px 0 0;
+  font-size: 11.5px; line-height: 1.6;
+  color: var(--text-dim);
+  overflow-wrap: anywhere;
+}
+.tvdb-side-desc.is-empty { color: var(--text-mute); font-style: italic; }
+/* 按钮钉在简介下面，简介长短不一时位置不会跳 */
+.tvdb-side-acts { display: flex; flex-wrap: wrap; gap: 6px; margin-top: auto; padding-top: 9px; }
+
+.tvdb-row-skel {
+  flex: none;
+  height: 46px;
+  border-radius: 10px;
+  background: linear-gradient(100deg, var(--surface-2), var(--surface-3), var(--surface-2));
+  background-size: 200% 100%;
+  animation: cover-shine 1.2s linear infinite;
+}
+.tvdb-side-skel {
+  flex: 1;
+  align-self: stretch;
+  min-height: 120px;
+  border-radius: 12px;
+  background: linear-gradient(100deg, var(--surface-2), var(--surface-3), var(--surface-2));
+  background-size: 200% 100%;
+  animation: cover-shine 1.2s linear infinite;
+}
 .cover-sec small.is-busy { color: var(--accent); }
 .tvdb-attr { margin: 9px 0 0; text-align: center; }
 .tvdb-attr a { color: var(--accent); text-decoration: none; }
@@ -2058,7 +2171,7 @@ input:checked + .checkbox::after { opacity: 1; transform: rotate(-45deg) scale(1
   .toasts { left: 14px; right: 14px; bottom: calc(92px + env(safe-area-inset-bottom)); align-items: center; }
   .toast { max-width: 100%; }
 
-  .cover-card { width: 100%; }
+  .cover-card, .cover-card.is-wide { width: 100%; }
   .cover-big { width: 74px; }
   .cover-grid { grid-template-columns: repeat(auto-fill, minmax(68px, 1fr)); max-height: 38vh; gap: 8px; }
   .cover-item span { display: none; }
@@ -2070,6 +2183,11 @@ input:checked + .checkbox::after { opacity: 1; transform: rotate(-45deg) scale(1
   .cover-acts .paste-input { width: auto; }
   .tvdb-bar { flex-wrap: wrap; }
   .tvdb-bar input[type='text'] { flex: 1 1 100%; }
+  /* 窄屏双栏撑不开，改成上下：列表限高自己滚，简介跟在下面 */
+  .tvdb-split { grid-template-columns: 1fr; }
+  .tvdb-list { max-height: 32vh; }
+  .tvdb-side { max-height: none; }
+  .tvdb-side-pic { width: 74px; }
 
   .state-view { padding: 54px 20px; }
 }
