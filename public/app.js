@@ -2205,6 +2205,7 @@ function openModal(id) {
   document.body.dataset.modal = id;
 }
 function closeModal(id) {
+  if (id === 'pasteModal') { closePasteSheet(); return; } // 粘贴面板要顺带还原本来的弹窗
   const el = document.getElementById(id);
   if (!el) return;
   el.hidden = true;
@@ -2660,7 +2661,7 @@ function resetAddCover() {
   $('#addCoverClear').hidden = true;
   $('#addCoverHint').textContent = '可选';
   $('#addCoverTitle').textContent = '不设置也可以';
-  $('#addCoverDesc').textContent = '默认用种子目录里的图片，没有就显示类型图标；也可以直接粘贴一张（⌘/Ctrl+V）';
+  $('#addCoverDesc').textContent = '默认用种子目录里的图片，没有就显示类型图标；也可以粘贴一张（桌面 ⌘/Ctrl+V，手机点「粘贴」）';
   $('#addScrapeLabel').textContent = '刮削封面';
   $('#addArts').hidden = true;
   $('#addArts').innerHTML = '';
@@ -2881,6 +2882,110 @@ document.addEventListener('paste', async (e) => {
     if (setAddCoverFile(file)) toast('已粘贴封面，添加后自动套用', 'ok');
   }
 });
+
+/* ── 移动端粘贴：系统不让网页读剪贴板，借一个 contenteditable 走「粘贴」菜单 ── */
+let pasteKind = 'cover'; // 'cover' | 'add'
+let pasteBack = '';      // 面板关掉后该回到哪个弹窗
+
+/** 先试 Clipboard API：Android Chrome / 桌面支持，iOS Safari 基本不给读图 */
+async function readClipboardImage() {
+  if (!navigator.clipboard?.read) return null;
+  try {
+    const items = await navigator.clipboard.read();
+    for (const item of items) {
+      const type = (item.types || []).find((t) => /^image\//.test(t));
+      if (!type) continue;
+      const blob = await item.getType(type);
+      const ext = (type.split('/')[1] || 'png').replace('jpeg', 'jpg');
+      return new File([blob], `clipboard.${ext}`, { type });
+    }
+  } catch { /* 没授权 / 不支持读图片，退回粘贴面板 */ }
+  return null;
+}
+
+/** 有些浏览器粘贴过来的是 <img src="data:|blob:">，把地址上的图捞回来 */
+async function fileFromSrc(src) {
+  if (!src) return null;
+  try {
+    const res = await fetch(src);
+    if (!res.ok) return null;
+    const blob = await res.blob();
+    if (!/^image\//.test(blob.type)) return null;
+    const ext = (blob.type.split('/')[1] || 'png').replace('jpeg', 'jpg');
+    return new File([blob], `pasted.${ext}`, { type: blob.type });
+  } catch { return null; }
+}
+
+function openPasteSheet(kind) {
+  pasteKind = kind;
+  pasteBack = kind === 'add' ? 'addModal' : 'coverModal';
+  const zone = $('#pasteZone');
+  zone.innerHTML = '';
+  openModal('pasteModal');
+  // 桌面聚焦方便直接 Ctrl+V；手机上聚焦会弹键盘挡住面板，交给长按
+  if (!window.matchMedia('(pointer: coarse)').matches) setTimeout(() => zone.focus(), 120);
+}
+
+function closePasteSheet() {
+  $('#pasteZone').innerHTML = '';
+  $('#pasteModal').hidden = true;
+  if (pasteBack && !$('#' + pasteBack).hidden) document.body.dataset.modal = pasteBack;
+  else delete document.body.dataset.modal;
+}
+
+function applyPastedImage(file) {
+  if (!file) return;
+  if (pasteKind === 'add') {
+    if (setAddCoverFile(file)) {
+      closePasteSheet();
+      toast('已粘贴封面，添加后自动套用', 'ok');
+    }
+    return;
+  }
+  closePasteSheet();
+  if (!coverHash) return;
+  uploadCoverFile(coverHash, file).then((ok) => { if (ok) toast('已粘贴封面', 'ok'); });
+}
+
+/** 点「粘贴」：手机上先试读剪贴板（Android 能读），读不到就开长按粘贴的框；
+    桌面不弹权限申请，直接开框让用户 Ctrl+V */
+async function pasteFromClipboard(kind) {
+  if (window.matchMedia('(pointer: coarse)').matches) {
+    const file = await readClipboardImage();
+    if (file) { pasteKind = kind; applyPastedImage(file); return; }
+  }
+  openPasteSheet(kind);
+}
+
+const pasteZone = $('#pasteZone');
+pasteZone.addEventListener('paste', async (e) => {
+  const file = clipboardImage(e);
+  if (file) { e.preventDefault(); applyPastedImage(file); return; }
+  // iOS 有时只给 text/html，里面是 <img src="blob:|data:">
+  const html = e.clipboardData?.getData('text/html') || '';
+  const src = /<img[^>]+src\s*=\s*["']([^"']+)["']/i.exec(html)?.[1];
+  const fromHtml = await fileFromSrc(src);
+  if (fromHtml) { e.preventDefault(); applyPastedImage(fromHtml); }
+  // 都没拿到就别拦，让系统把图插进框里，下面的 input 事件接着处理
+});
+pasteZone.addEventListener('input', async () => {
+  const img = pasteZone.querySelector('img');
+  if (!img) return;
+  const file = await fileFromSrc(img.currentSrc || img.src);
+  if (file) applyPastedImage(file);
+});
+pasteZone.addEventListener('dragover', (e) => { e.preventDefault(); pasteZone.classList.add('is-over'); });
+pasteZone.addEventListener('dragleave', () => pasteZone.classList.remove('is-over'));
+pasteZone.addEventListener('drop', async (e) => {
+  e.preventDefault();
+  pasteZone.classList.remove('is-over');
+  const file = Array.from(e.dataTransfer?.files || []).find((f) => /^image\//.test(f.type));
+  if (file) applyPastedImage(file);
+});
+
+$('#coverPaste').addEventListener('click', () => pasteFromClipboard('cover'));
+$('#addPasteBtn').addEventListener('click', () => pasteFromClipboard('add'));
+
 $('#addCoverClear').addEventListener('click', resetAddCover);
 
 function fillCategorySelect() {

@@ -13,7 +13,7 @@
 <link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'><rect width='32' height='32' rx='9' fill='%236c8cff'/><path d='M16 8v12m0 0l-4.5-4.5M16 20l4.5-4.5M9 24h14' stroke='white' stroke-width='2.4' stroke-linecap='round' stroke-linejoin='round' fill='none'/></svg>" />
 <!-- ?v= 是资源版本号：改 styles.css / app.js 必须同步改这里，iOS PWA 的 Service Worker
      更新不可靠，靠 URL 变化强制绕过旧缓存。sw.js 的 SHELL 列表也要同步。 -->
-<link rel="stylesheet" href="styles.css?v=20261024ai" />
+<link rel="stylesheet" href="styles.css?v=20261024ak" />
 <link rel="manifest" href="manifest.webmanifest" />
 <link rel="apple-touch-icon" href="icon-180.png" />
 <meta name="apple-mobile-web-app-title" content="qBWebUI" />
@@ -139,6 +139,7 @@
   <symbol id="i-archive" viewBox="0 0 24 24"><path d="M3.5 7.5h17v11a2 2 0 0 1-2 2h-13a2 2 0 0 1-2-2z"/><path d="M3 4h18v3.5H3zM10.2 11.5h3.6"/></symbol>
   <symbol id="i-book" viewBox="0 0 24 24"><path d="M4 5.5A2.5 2.5 0 0 1 6.5 3H19v15.5H6.5A2.5 2.5 0 0 0 4 21V5.5z"/><path d="M8 7.5h7M8 11h5"/></symbol>
   <symbol id="i-photo" viewBox="0 0 24 24"><rect x="3" y="4.5" width="18" height="15" rx="3"/><path d="m4.5 16.5 4.8-4.8 3.2 3.2 2.6-2.6 4.4 4.4"/><circle cx="8.4" cy="9.2" r="1.6"/></symbol>
+  <symbol id="i-paste" viewBox="0 0 24 24"><rect x="5" y="4.5" width="14" height="16" rx="2.6"/><path d="M9 6.5V3.4h6v3.1"/><path d="M8.6 11h6.8M8.6 14.4h6.8M8.6 17.8h4"/></symbol>
 </svg>
 
 <div class="app" id="app">
@@ -364,9 +365,10 @@
           <div class="cover-pick-box" id="addCoverBox"><svg><use href="#i-image"/></svg></div>
           <div class="cover-pick-main">
             <b id="addCoverTitle">不设置也可以</b>
-            <small id="addCoverDesc">默认用种子目录里的图片，没有就显示类型图标；也可以直接粘贴一张（⌘/Ctrl+V）</small>
+            <small id="addCoverDesc">默认用种子目录里的图片，没有就显示类型图标；也可以粘贴一张（桌面 ⌘/Ctrl+V，手机点「粘贴」）</small>
             <div class="cover-pick-actions">
               <button class="btn btn-ghost btn-sm" id="addCoverBtn" type="button" title="选择图片，或直接 ⌘/Ctrl+V 粘贴"><svg><use href="#i-upload"/></svg>选择图片</button>
+              <button class="btn btn-ghost btn-sm" id="addPasteBtn" type="button" title="从剪贴板粘贴一张图"><svg><use href="#i-paste"/></svg>粘贴</button>
               <button class="btn btn-ghost btn-sm" id="addCoverClear" type="button" hidden>移除</button>
             </div>
           </div>
@@ -406,10 +408,11 @@
           <p class="hint" id="coverKind"></p>
           <div class="cover-acts">
             <button class="btn btn-soft btn-sm" id="coverUpload" title="选择图片，或直接 ⌘/Ctrl+V 粘贴"><svg><use href="#i-upload"/></svg>上传</button>
+            <button class="btn btn-soft btn-sm" id="coverPaste" title="从剪贴板粘贴一张图（手机先复制图片）"><svg><use href="#i-paste"/></svg>粘贴</button>
             <button class="btn btn-soft btn-sm" id="coverIcon"><svg><use href="#i-image"/></svg>用图标</button>
             <button class="btn btn-ghost btn-sm" id="coverAuto"><svg><use href="#i-refresh"/></svg>自动</button>
           </div>
-          <p class="hint cover-paste-hint">也可以直接 <kbd>⌘</kbd>/<kbd>Ctrl</kbd> + <kbd>V</kbd> 粘贴一张图</p>
+          <p class="hint cover-paste-hint">桌面直接 <kbd>⌘</kbd>/<kbd>Ctrl</kbd> + <kbd>V</kbd>；手机先复制图片，再点「粘贴」</p>
         </div>
         <input type="file" id="coverFile" accept="image/*" hidden />
       </div>
@@ -436,6 +439,24 @@
       </div>
       <div class="cover-grid" id="tvdbGrid"></div>
       <p class="hint tvdb-attr">Metadata provided by <a href="https://www.thetvdb.com" target="_blank" rel="noreferrer">TheTVDB</a> · 海报版权归各自权利人，仅限个人本地使用</p>
+    </div>
+  </div>
+</div>
+
+<!-- ══════════ 粘贴图片 ══════════ -->
+<div class="modal" id="pasteModal" hidden>
+  <div class="modal-card paste-card">
+    <div class="modal-head">
+      <h2>粘贴图片</h2>
+      <button class="icon-btn" data-close="pasteModal"><svg><use href="#i-x"/></svg></button>
+    </div>
+    <div class="modal-body">
+      <div class="paste-zone" id="pasteZone" contenteditable="true" role="textbox" aria-multiline="true"
+        aria-label="长按这里粘贴图片" data-placeholder="长按这里，选「粘贴」"></div>
+      <p class="hint">手机系统不允许网页直接读剪贴板，所以借这个输入框：长按 → 「粘贴」，图一出现就自动用上。桌面直接 ⌘/Ctrl+V，也可以把图片拖进来。</p>
+    </div>
+    <div class="modal-foot">
+      <button class="btn btn-ghost" data-close="pasteModal">取消</button>
     </div>
   </div>
 </div>
@@ -622,6 +643,6 @@
 
 <div class="toasts" id="toasts"></div>
 
-<script type="module" src="app.js?v=20261024ai"></script>
+<script type="module" src="app.js?v=20261024ak"></script>
 </body>
 </html>

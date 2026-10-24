@@ -1081,6 +1081,28 @@ input:checked + .checkbox::after { opacity: 1; transform: rotate(-45deg) scale(1
   color: var(--text-dim);
 }
 
+/* 移动端没有 ⌘V：借一个 contenteditable 走系统「粘贴」菜单 */
+.paste-card { width: min(440px, 100%); }
+.paste-zone {
+  min-height: 168px;
+  display: grid;
+  place-items: center;
+  padding: 14px;
+  border: 1px dashed var(--line-strong);
+  border-radius: 12px;
+  background: var(--surface-2);
+  color: var(--text-mute);
+  font-size: 12px;
+  line-height: 1.6;
+  text-align: center;
+  overflow: auto;
+  -webkit-user-select: text;
+  user-select: text;
+}
+.paste-zone:focus { outline: none; border-color: color-mix(in srgb, var(--accent) 60%, transparent); }
+.paste-zone:empty::before { content: attr(data-placeholder); }
+.paste-zone img { display: block; max-width: 100%; max-height: 220px; margin: 4px auto; border-radius: 8px; }
+
 .cover-sec {
   display: flex; align-items: baseline; justify-content: space-between; gap: 10px;
   font-size: 12px; font-weight: 600; color: var(--text-dim);
@@ -1088,7 +1110,8 @@ input:checked + .checkbox::after { opacity: 1; transform: rotate(-45deg) scale(1
 /* 目录路径可能很长：标题行自己截断，右边的张数别被挤成两行 */
 .cover-sec > span { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .cover-sec em { font-style: normal; font-weight: 500; color: var(--text-mute); font-size: 11px; }
-.cover-sec small { color: var(--text-mute); font-weight: 500; font-size: 11px; flex: none; white-space: nowrap; }
+.cover-sec small { color: var(--text-mute); font-weight: 500; font-size: 11px; text-align: right; }
+#coverCount { flex: none; white-space: nowrap; }
 
 .cover-grid {
   display: grid;
@@ -2023,6 +2046,9 @@ input:checked + .checkbox::after { opacity: 1; transform: rotate(-45deg) scale(1
   .cover-grid { grid-template-columns: repeat(auto-fill, minmax(68px, 1fr)); max-height: 38vh; gap: 8px; }
   .cover-item span { display: none; }
   .cover-pick { gap: 10px; }
+  /* 四个按钮在窄屏排成 2×2，比 3+1 的折行好看 */
+  .cover-acts { display: grid; grid-template-columns: 1fr 1fr; gap: 7px; }
+  .cover-acts .btn { justify-content: center; }
   .tvdb-bar { flex-wrap: wrap; }
   .tvdb-bar input[type='text'] { flex: 1 1 100%; }
 
