@@ -308,6 +308,14 @@ function buildMedia() {
   mkdirSync(MEDIA_DIR, { recursive: true });
   torrents.forEach((t, i) => {
     const slug = t.name.replace(/[^a-zA-Z0-9]+/g, '-').replace(/^-|-$/g, '').slice(0, 42).toLowerCase();
+    // 一半做成「单文件直接放在共享下载目录」——这类种子不该去扫共享目录找图
+    if (i % 2 === 0) {
+      const file = path.join(MEDIA_DIR, `${slug}.iso`);
+      writeFileSync(file, `demo placeholder for ${t.name}\n`);
+      t.content_path = file;
+      t.save_path = MEDIA_DIR;
+      return;
+    }
     const dir = path.join(MEDIA_DIR, `${String(i + 1).padStart(2, '0')}-${slug}`);
     mkdirSync(path.join(dir, 'extras'), { recursive: true });
     writeFileSync(path.join(dir, 'poster.svg'), posterSvg(t.name.slice(0, 26), t.category || 'demo', i));
@@ -339,7 +347,12 @@ const server = http.createServer((req, res) => {
       upnp: true,
     });
   }
-  if (p === '/api/v2/torrents/info') return json(res, torrents);
+  if (p === '/api/v2/torrents/info') {
+    const hashes = url.searchParams.get('hashes');
+    if (!hashes) return json(res, torrents);
+    const want = hashes.split('|');
+    return json(res, torrents.filter((t) => want.includes(t.hash)));
+  }
   if (p === '/api/v2/torrents/categories') return json(res, categories);
   if (p === '/api/v2/torrents/properties') {
     const t = torrents.find((x) => x.hash === hash);

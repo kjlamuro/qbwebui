@@ -1120,6 +1120,15 @@ async function loadCoverCandidates(hash) {
     return;
   }
   state.coverMode.set(hash, data.mode);
+  if (!data.dir) {
+    // 单文件种子直接躺在共享下载目录里：不去扫别人的图，直接引导上传
+    $('#coverMode').textContent = '当前：类型图标';
+    $('#coverDir').textContent = '没有独立目录';
+    $('#coverCount').textContent = '';
+    grid.innerHTML = '<div class="cover-empty">这个种子没有独立目录，为避免误用同目录下别人的图片，目录匹配已跳过。<br>可以自己上传一张。</div>';
+    paintCoverBig();
+    return;
+  }
   $('#coverMode').textContent =
     data.mode === 'custom' ? '当前：自定义图片'
       : data.mode === 'icon' ? '当前：类型图标'
