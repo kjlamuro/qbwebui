@@ -32,6 +32,7 @@ const state = {
   detailHash: null,
   detailData: null,
   detailTab: 'files',
+  fileEdit: false, // 文件列表的勾选默认锁着，点「修改下载列表」才解锁
   categories: {},
   tags: [],
   pollMs: Number(localStorage.getItem(LS.interval) ?? 2000),
@@ -424,7 +425,7 @@ function createRow(t) {
   el.innerHTML = `
     <div class="cell check"><label class="check-wrap"><input type="checkbox" /><span class="checkbox"></span></label></div>
     <div class="cell name">
-      <div class="thumb" data-act="cover" title="更换封面"><img alt="" loading="lazy" decoding="async" /><svg><use href="#i-inbox"/></svg></div>
+      <div class="thumb" data-act="cover" title="封面•刮削"><img alt="" loading="lazy" decoding="async" /><svg><use href="#i-inbox"/></svg></div>
       <div class="t-text"><div class="t-name"></div><span class="t-media" hidden></span><div class="t-sub"></div></div>
     </div>
     <div class="cell size"></div>
@@ -946,6 +947,7 @@ async function openDetail(hash) {
   state.detailHash = hash;
   state.detailData = null;
   state.detailTab = 'files';
+  state.fileEdit = false; // 换种子就退出编辑态
   detailEl.classList.add('is-open');
   detailEl.setAttribute('aria-hidden', 'false');
   detailScrim.classList.add('is-open');
@@ -965,6 +967,7 @@ async function openDetail(hash) {
 
 function closeDetail() {
   state.detailHash = null;
+  state.fileEdit = false;
   closeViewer(); // 详情关了，预览也不该留着
   detailEl.classList.remove('is-open');
   detailEl.setAttribute('aria-hidden', 'true');
@@ -1535,12 +1538,25 @@ function renderDetail() {
   let tabContent = '';
   if (data) {
     if (state.detailTab === 'files') {
+      // 勾选默认锁着：文件列表一排方框太容易被误点（尤其手机上）
+      const editing = state.fileEdit;
+      const skipped = files.filter((f) => f.priority === 0).length;
+      const filesBar = files.length
+        ? `<div class="d-files-bar">
+            <span class="d-files-sum">${files.length} 个文件${skipped ? ` · 已跳过 ${skipped}` : ''}</span>
+            <button class="btn btn-ghost btn-sm d-file-edit${editing ? ' is-on' : ''}" id="fileEditBtn" type="button">
+              <svg><use href="#${editing ? 'i-check' : 'i-list'}"/></svg>${editing ? '完成' : '修改下载列表'}
+            </button>
+          </div>`
+        : '';
       tabContent = files.length
-        ? mediaBarHtml(files) + `<div class="d-list-head">点击左侧方框可跳过 / 恢复该文件；图片 / 视频点文件名可直接预览，也可以连续翻页</div>` + files.map((f, i) => {
+        ? mediaBarHtml(files) + filesBar + files.map((f, i) => {
           const kind = mediaKindOf(f.name);
+          const done = f.progress >= 1;
           return `
-          <div class="file-row">
-            <button class="f-toggle ${f.priority > 0 ? 'on' : ''}" data-file="${i}" data-priority="${f.priority}">
+          <div class="file-row${done ? '' : ' is-partial'}${f.priority === 0 ? ' is-skip' : ''}">
+            <button class="f-toggle ${f.priority > 0 ? 'on' : ''}" data-file="${i}" data-priority="${f.priority}" type="button"
+              ${editing ? '' : 'disabled'} aria-label="${f.priority > 0 ? '跳过' : '恢复'}该文件">
               <svg><use href="#i-check"/></svg>
             </button>
             <span class="f-name ${f.priority === 0 ? 'is-skip' : ''} ${kind ? 'is-media' : ''}" ${kind ? `data-media="${i}" title="点击预览"` : ''}>${esc(f.name)}</span>
@@ -1585,7 +1601,7 @@ function renderDetail() {
 
   body.innerHTML = `
     <div class="d-hero">
-      <div class="d-cover" data-detail="cover" title="更换封面"><img alt="" loading="lazy" decoding="async" /><svg><use href="#i-inbox"/></svg></div>
+      <div class="d-cover" data-detail="cover" title="封面•刮削"><img alt="" loading="lazy" decoding="async" /><svg><use href="#i-inbox"/></svg></div>
       ${ringSvg(t.progress, st.key)}
       <div class="d-hero-info">
         <div class="d-speed">
@@ -1619,7 +1635,7 @@ function renderDetail() {
   const paused = isPaused(t);
   $('#detailFoot').innerHTML = `
     <button class="btn btn-soft" data-detail="toggle">${paused ? '<svg><use href="#i-play"/></svg>继续' : '<svg><use href="#i-pause"/></svg>暂停'}</button>
-    <button class="btn btn-ghost" data-detail="cover"><svg><use href="#i-photo"/></svg>封面</button>
+    <button class="btn btn-ghost" data-detail="cover"><svg><use href="#i-photo"/></svg>封面•刮削</button>
     <button class="btn btn-ghost" data-detail="menu"><svg><use href="#i-more"/></svg>更多</button>
     <button class="btn btn-ghost danger" data-detail="delete"><svg><use href="#i-trash"/></svg>删除</button>
   `;
@@ -1638,6 +1654,12 @@ $('#detailBody').addEventListener('click', async (e) => {
     return;
   }
   if (e.target.closest('[data-detail="cover"]')) { openCoverModal(state.detailHash); return; }
+  const editBtn = e.target.closest('#fileEditBtn');
+  if (editBtn) {
+    state.fileEdit = !state.fileEdit;
+    renderDetail();
+    return;
+  }
   const tab = e.target.closest('[data-tab]');
   if (tab) {
     state.detailTab = tab.dataset.tab;
@@ -1706,7 +1728,7 @@ function openTorrentMenu(hash) {
     <button class="action-item" data-menu="force"><svg><use href="#i-activity"/></svg>${t.force_start ? '取消强制开始' : '强制开始'}</button>
     <button class="action-item" data-menu="seq"><svg><use href="#i-list"/></svg>${t.seq_dl ? '关闭顺序下载' : '顺序下载'}</button>
     <button class="action-item" data-menu="cat"><svg><use href="#i-folder"/></svg>设置分类<small>${esc(t.category || '未分类')}</small></button>
-    <button class="action-item" data-menu="cover"><svg><use href="#i-photo"/></svg>更换封面<small>自定义 / 目录 / 图标</small></button>
+    <button class="action-item" data-menu="cover"><svg><use href="#i-photo"/></svg>封面•刮削<small>自定义 / 目录 / TVDB</small></button>
     <button class="action-item" data-menu="recheck"><svg><use href="#i-refresh"/></svg>重新校验</button>
     <button class="action-item" data-menu="reannounce"><svg><use href="#i-wifi"/></svg>重新通告 Tracker</button>
     <button class="action-item danger" data-menu="delete"><svg><use href="#i-trash"/></svg>删除种子</button>

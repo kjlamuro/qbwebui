@@ -1016,7 +1016,26 @@ input:checked + .checkbox::after { opacity: 1; transform: rotate(-45deg) scale(1
 .tr-err { color: var(--danger); }
 
 .d-empty { padding: 26px 10px; text-align: center; color: var(--text-mute); font-size: 12.5px; }
-.d-list-head { font-size: 11px; text-transform: uppercase; letter-spacing: 0.7px; color: var(--text-mute); padding: 4px 8px; }
+
+/* 文件列表工具条：左边数量，右边「修改下载列表」开关 */
+.d-files-bar {
+  display: flex; align-items: center; justify-content: space-between; gap: 10px;
+  padding: 2px 4px 2px 8px;
+  margin-top: 2px;
+}
+.d-files-sum { font-size: 11.5px; color: var(--text-mute); }
+.d-file-edit { padding: 4px 10px; font-size: 11.5px; }
+.d-file-edit.is-on { background: var(--accent-soft); color: var(--accent); border-color: transparent; }
+
+/* 没下完的文件整体淡一点，一眼能分清「已经有的」和「还在下的」 */
+.file-row.is-partial .f-name { opacity: 0.6; }
+.file-row.is-partial .f-size,
+.file-row.is-partial .f-prog { opacity: 0.45; }
+.file-row.is-partial .f-toggle { opacity: 0.5; }
+
+/* 锁着的方框只是个状态灯，不给点 */
+.file-row .f-toggle:disabled { cursor: default; }
+.file-row .f-toggle:disabled:not(.on) { border-color: var(--line); }
 
 /* ══════════ 封面弹窗 ══════════ */
 .cover-card { width: min(620px, 100%); }

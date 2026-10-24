@@ -257,15 +257,26 @@ const files = (t) => {
       piece_range: [0, 0],
     }];
   }
-  return list.map((f, i) => ({
-    index: i,
-    name: f.name,
-    size: Math.max(1, Math.round(f.size)),
-    progress: t.progress >= 1 ? 1 : Math.min(1, Number((t.progress * 1.12).toFixed(4))),
-    priority: 1,
-    is_seed: t.progress >= 1,
-    piece_range: [0, 10],
-  }));
+  // 按体积顺序「填」进度：前面的文件下完了、中间那个下到一半、后面的还没开始。
+  // 真实 qBittorrent 也是这样，界面上未完成的文件会显示得更淡。
+  const total = list.reduce((a, f) => a + f.size, 0) || 1;
+  let acc = 0;
+  return list.map((f, i) => {
+    const start = acc / total;
+    acc += f.size;
+    const end = acc / total;
+    const span = end - start || 1;
+    const fileProgress = t.progress >= 1 ? 1 : Math.min(1, Math.max(0, (t.progress - start) / span));
+    return {
+      index: i,
+      name: f.name,
+      size: Math.max(1, Math.round(f.size)),
+      progress: Number(fileProgress.toFixed(4)),
+      priority: 1,
+      is_seed: t.progress >= 1,
+      piece_range: [0, 10],
+    };
+  });
 };
 
 const trackers = () => [

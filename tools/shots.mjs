@@ -267,7 +267,8 @@ const SHOTS = [
     width: 1440, height: 900, dsf: 2, out: 1600, theme: 'light',
     ready: "document.querySelectorAll('.row').length > 5",
     async run(page) {
-      await page.evaluate(rowByName('Big Buck Bunny'));
+      // 选一个「正在下载、文件有公有私有」的种子：能看到未完成文件变淡 + 修改下载列表按钮
+      await page.evaluate(rowByName('Blender Open Movies Collection'));
       await page.waitFor("document.querySelector('#detail.is-open') && document.querySelector('#detailBody [data-media]')", { label: '详情文件列表' });
       await page.settle(900);
     },
