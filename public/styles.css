@@ -94,15 +94,34 @@ html, body {
 
 body {
   font-family: var(--font);
-  background: var(--bg);
-  background-image: var(--bg-grad);
-  background-attachment: fixed;
+  /* 文档层只给实色，不铺整屏渐变：iOS 独立 PWA 的状态栏会拿「文档根元素的不透明
+     背景色」定那一条的色调，文档层是渐变（或 background-attachment: fixed 的整屏
+     图层）时系统退回默认半透明材质 → 顶部那一条糊成雾。装饰光晕挪到 .main。 */
+  background-color: var(--bg);
   color: var(--text);
   font-size: 14px;
   line-height: 1.5;
   -webkit-font-smoothing: antialiased;
   text-rendering: optimizeLegibility;
   overflow: hidden;
+  /* iOS：禁掉页面级橡皮筋（PWA 里拉动会露出底层），点按不带灰色高亮 */
+  overscroll-behavior: none;
+  -webkit-tap-highlight-color: transparent;
+}
+
+html {
+  -webkit-text-size-adjust: 100%;
+  text-size-adjust: 100%;
+  /* 根元素必须有实色（stt-web 同款写法）：状态栏找不到实色就会用系统毛玻璃。
+     theme-color / manifest 的 theme_color 都跟这个色值保持一致（--bg）。 */
+  background-color: var(--bg);
+}
+
+/* 触屏：交互元素关掉双击缩放判定，点按零延迟 */
+@media (hover: none) {
+  button, a, .row, .chip, .nav-item, .icon-btn, label {
+    touch-action: manipulation;
+  }
 }
 
 .sprite { position: absolute; width: 0; height: 0; overflow: hidden; }
@@ -319,6 +338,10 @@ small { font-size: 11px; }
   min-width: 0;
   height: 100dvh;
   position: relative;
+  /* 背景光晕只铺在内容区，不铺文档层：顶部状态栏那一条要保持纯实色，
+     否则 iOS 会把状态栏降级成半透明毛玻璃（顶部发雾的根因）。 */
+  background-color: var(--bg);
+  background-image: var(--bg-grad);
 }
 
 .topbar {
@@ -327,8 +350,13 @@ small { font-size: 11px; }
   gap: 14px;
   padding: 14px 20px;
   border-bottom: 1px solid var(--line);
-  background: color-mix(in srgb, var(--bg) 78%, transparent);
-  backdrop-filter: blur(18px) saturate(160%);
+  /* 必须不透明，且底色与 body / html / theme-color 完全一致（都是 --bg）。
+     但不能是一块**平色**：iOS 26/27 的状态栏会盖一层材质，压在纯色上就是一条
+     发白的雾带（stt-web 看不出这个问题，是因为它顶部是彩色天气画布，材质糊在渐变上
+     看不出来）。所以这里从 --bg 起步、到下沿渐变到内容区那条光晕的颜色 —— 既不留
+     接缝，也不再是平色，材质叠上去就看不出来了。 */
+  background-color: var(--bg);
+  background-image: linear-gradient(180deg, rgba(108, 140, 255, 0) 0%, rgba(108, 140, 255, 0.085) 100%);
   z-index: 20;
   flex: none;
 }
@@ -597,8 +625,9 @@ input:checked + .checkbox::after { opacity: 1; transform: rotate(-45deg) scale(1
 .thumb {
   position: relative;
   flex: none;
-  width: 34px;
-  aspect-ratio: 2 / 3;
+  /* 固定高度而不是 2:3 —— 行高不该被海报比例拖着走，图片用 cover 裁切 */
+  width: 32px;
+  height: 46px;
   border-radius: 7px;
   overflow: hidden;
   display: grid;
@@ -628,6 +657,7 @@ input:checked + .checkbox::after { opacity: 1; transform: rotate(-45deg) scale(1
 .thumb.k-music { background: color-mix(in srgb, var(--up) 13%, var(--surface-3)); color: var(--up); }
 .thumb.k-image { background: color-mix(in srgb, var(--done) 14%, var(--surface-3)); color: var(--done); }
 .thumb.k-archive { background: color-mix(in srgb, var(--warn) 14%, var(--surface-3)); color: var(--warn); }
+.thumb.k-book { background: color-mix(in srgb, var(--accent-2) 16%, var(--surface-3)); color: var(--accent-2); }
 
 .t-name {
   font-size: 13.5px;
@@ -643,6 +673,9 @@ input:checked + .checkbox::after { opacity: 1; transform: rotate(-45deg) scale(1
 }
 .row:hover .t-name { color: var(--text); }
 .t-sub { display: flex; align-items: center; gap: 6px; min-width: 0; width: 100%; }
+/* 媒体名 / 原始名的副标题行（设置里「列表标题」开启后出现） */
+.t-media { font-size: 11px; line-height: 1.4; color: var(--text-mute); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.t-media[hidden] { display: none; }
 .badge-cat {
   display: inline-flex; align-items: center; gap: 4px;
   padding: 1px 7px;
@@ -920,6 +953,7 @@ input:checked + .checkbox::after { opacity: 1; transform: rotate(-45deg) scale(1
 .d-cover.k-music { background: color-mix(in srgb, var(--up) 13%, var(--surface-3)); color: var(--up); }
 .d-cover.k-image { background: color-mix(in srgb, var(--done) 14%, var(--surface-3)); color: var(--done); }
 .d-cover.k-archive { background: color-mix(in srgb, var(--warn) 14%, var(--surface-3)); color: var(--warn); }
+.d-cover.k-book { background: color-mix(in srgb, var(--accent-2) 16%, var(--surface-3)); color: var(--accent-2); }
 
 .d-hero-info { flex: 1; min-width: 0; display: flex; flex-direction: column; gap: 5px; }
 .d-hero-info .d-speed { display: flex; gap: 14px; font-size: 12.5px; }
@@ -1013,6 +1047,7 @@ input:checked + .checkbox::after { opacity: 1; transform: rotate(-45deg) scale(1
 .cover-big.k-music { background: color-mix(in srgb, var(--up) 13%, var(--surface-2)); color: var(--up); }
 .cover-big.k-image { background: color-mix(in srgb, var(--done) 14%, var(--surface-2)); color: var(--done); }
 .cover-big.k-archive { background: color-mix(in srgb, var(--warn) 14%, var(--surface-2)); color: var(--warn); }
+.cover-big.k-book { background: color-mix(in srgb, var(--accent-2) 16%, var(--surface-2)); color: var(--accent-2); }
 
 .cover-top-info { flex: 1; min-width: 0; display: flex; flex-direction: column; gap: 4px; }
 .cover-name { margin: 0; font-size: 13.5px; font-weight: 600; line-height: 1.45; word-break: break-all; }
@@ -1079,6 +1114,44 @@ input:checked + .checkbox::after { opacity: 1; transform: rotate(-45deg) scale(1
   to { background-position: -100% 0; }
 }
 
+/* TheTVDB 刮削 */
+.tvdb-bar {
+  display: flex; align-items: center; gap: 7px;
+  margin: 0 0 9px;
+}
+.tvdb-bar input[type='text'] {
+  flex: 1; min-width: 0;
+  padding: 7px 10px;
+  font-size: 12.5px;
+  color: var(--text);
+  background: var(--surface-2);
+  border: 1px solid var(--line);
+  border-radius: 9px;
+}
+.tvdb-bar input[type='text']:focus { outline: none; border-color: color-mix(in srgb, var(--accent) 60%, transparent); }
+.tvdb-bar select {
+  padding: 7px 6px;
+  font-size: 12px;
+  color: var(--text);
+  background: var(--surface-2);
+  border: 1px solid var(--line);
+  border-radius: 9px;
+}
+.tvdb-bar .btn { white-space: nowrap; }
+.tvdb-item .tvdb-cap {
+  display: flex; flex-direction: column; gap: 1px;
+  padding: 12px 6px 5px;
+}
+.tvdb-item .tvdb-cap b {
+  font-size: 10.5px; font-weight: 600; line-height: 1.25;
+  white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+}
+.tvdb-item .tvdb-cap small { font-size: 9.5px; opacity: 0.85; background: none; }
+.cover-sec small.is-busy { color: var(--accent); }
+.tvdb-attr { margin: 9px 0 0; text-align: center; }
+.tvdb-attr a { color: var(--accent); text-decoration: none; }
+.tvdb-attr a:hover { text-decoration: underline; }
+
 /* 添加种子时的封面选择 */
 .cover-pick {
   display: flex; align-items: center; gap: 12px;
@@ -1111,12 +1184,19 @@ input:checked + .checkbox::after { opacity: 1; transform: rotate(-45deg) scale(1
 .scrim {
   position: fixed; inset: 0;
   background: var(--scrim);
-  backdrop-filter: blur(3px);
   opacity: 0; pointer-events: none;
   transition: opacity var(--normal);
   z-index: 50;
 }
-.scrim.is-open { opacity: 1; pointer-events: auto; }
+/* 毛玻璃只在真正打开时才加。常驻的 backdrop-filter（哪怕 opacity: 0、pointer-events: none）
+   会让 iOS 给整页留一张「过期的背景快照」，独立 PWA 里就表现为顶部一条雾：
+   点一下界面（抽屉滑入的动画）快照被刷新、雾短暂消失，动画停下又回来。
+   这正是「点左上角边栏按钮雾消失、抽屉弹出后又出现」的成因。 */
+.scrim.is-open {
+  opacity: 1; pointer-events: auto;
+  backdrop-filter: blur(3px);
+  -webkit-backdrop-filter: blur(3px);
+}
 #scrim { z-index: 85; }
 .scrim-detail { z-index: 75; }
 
@@ -1155,6 +1235,10 @@ input:checked + .checkbox::after { opacity: 1; transform: rotate(-45deg) scale(1
 .modal-head h2 { margin: 0; font-size: 16.5px; font-weight: 650; }
 .modal-sub { margin: -4px 20px 12px; font-size: 12px; color: var(--text-mute); word-break: break-all; }
 .modal-body { padding: 4px 20px 18px; overflow-y: auto; display: flex; flex-direction: column; gap: 14px; }
+/* 弹窗内容是滚动的，不是被压扁的：flex 子项默认 flex-shrink:1，
+   窗口一矮就把封面网格 / 设置卡片压扁（海报被裁掉半截），
+   所以这里固定不收缩，交给 .modal-body 自己滚 */
+.modal-body > * { flex: 0 0 auto; }
 .modal-foot {
   display: flex; justify-content: flex-end; gap: 10px;
   padding: 14px 20px calc(16px + env(safe-area-inset-bottom));
@@ -1607,6 +1691,24 @@ input:checked + .checkbox::after { opacity: 1; transform: rotate(-45deg) scale(1
   .icon-btn.only-mobile { display: grid !important; }
   .only-desktop { display: none !important; }
 
+  /* 所有弹窗在窄屏统一降级成「底部抽屉」：贴底全宽、顶部圆角、上滑入场。
+     居中浮层在手机上两侧留 20px 缝、内容宽度被砍，长按钮行会溢出截断。 */
+  .modal { place-items: end center; padding: 0; }
+  .modal-card {
+    width: 100%;
+    max-width: none;
+    max-height: 92dvh;
+    border-radius: 20px 20px 0 0;
+    border-left: 0;
+    border-right: 0;
+    border-bottom: 0;
+    animation: sheet-up 300ms var(--ease);
+  }
+  /* 窄屏上按钮组放不下一行就换行，避免文字被裁 */
+  .row-actions { flex-wrap: wrap; }
+  .row-actions .btn { flex: 1 1 auto; }
+  /* 登录 / 确认框在本 media 后段已有各自的抽屉化规则，保持原设计 */
+
   /* 操作菜单在窄屏回到「底部抽屉」形态：贴底、圆角只在上方、带拖拽条 */
   .sheet-modal { place-items: end center; padding: 0; }
   .sheet-card {
@@ -1638,6 +1740,11 @@ input:checked + .checkbox::after { opacity: 1; transform: rotate(-45deg) scale(1
     transform: translateX(-104%);
     transition: transform 300ms var(--ease);
     background: var(--surface);
+    /* 移动端抽屉是不透明的，blur 没有视觉收益；可它常驻在视口左上角
+       （只是 translateX(-104%) 挪出去），带 backdrop-filter 时 iOS 会把
+       这片顶部区域采成雾。关掉。 */
+    backdrop-filter: none;
+    -webkit-backdrop-filter: none;
     box-shadow: var(--shadow-lg);
     border-right: 1px solid var(--line);
     z-index: 90;
@@ -1650,11 +1757,13 @@ input:checked + .checkbox::after { opacity: 1; transform: rotate(-45deg) scale(1
   .main { height: 100dvh; }
 
   .topbar {
-    padding: calc(10px + env(safe-area-inset-top)) 14px 10px;
+    /* 顶部留白对齐 stt-web 的量级（它首屏内容在 calc(34px + env(top)) 处才开始，我们原来只有 10px）：
+       iOS 26/27 的状态栏材质会往内容区渗一小段，搜索栏离状态栏太近就正好泡在那层里面，
+       看着像整个顶栏被糊了一层。抬到 24px 之后内容和那层分开，顶栏也不再是一条窄平色。 */
+    padding: calc(24px + env(safe-area-inset-top)) 14px 12px;
     gap: 8px;
-    background: color-mix(in srgb, var(--bg) 88%, transparent);
-  }
-  .topbar .search { flex: 1 1 auto; max-width: none; }
+    /* 底色/渐变沿用基础层（--bg 起步 → 下沿接内容光晕），这里只调间距 */
+  }  .topbar .search { flex: 1 1 auto; max-width: none; }
   .search input { height: 38px; }
   /* iOS 对 <16px 的输入框会自动放大页面，这里统一提到 16px */
   .search input, .field input, .field select, .textarea { font-size: 16px; }
@@ -1678,6 +1787,12 @@ input:checked + .checkbox::after { opacity: 1; transform: rotate(-45deg) scale(1
   .list-head { display: none; }
   .list-scroll { padding: 4px 10px calc(96px + env(safe-area-inset-bottom)); }
 
+  /* iOS 长按会选中文字弹菜单，列表/导航这类操作面不参与文本选择 */
+  .rows, .row, .mobile-nav, .chips, .topbar {
+    user-select: none;
+    -webkit-user-select: none;
+  }
+
   /* 行 → 卡片 */
   .rows { gap: 8px; }
   .row {
@@ -1700,7 +1815,7 @@ input:checked + .checkbox::after { opacity: 1; transform: rotate(-45deg) scale(1
   .row.is-selected::before { display: none; }
   .row .cell.check { grid-area: check; padding-top: 2px; }
   .row .cell.name { grid-area: name; gap: 10px; }
-  .thumb { width: 46px; border-radius: 9px; }
+  .thumb { width: 44px; height: 64px; border-radius: 9px; }
   .thumb svg { width: 18px; height: 18px; }
   .row .cell.state { grid-area: state; }
   .row .cell.prog { grid-area: prog; gap: 8px; }
@@ -1745,7 +1860,7 @@ input:checked + .checkbox::after { opacity: 1; transform: rotate(-45deg) scale(1
     display: grid;
     grid-template-columns: repeat(5, 1fr);
     align-items: center;
-    padding: 6px 8px calc(6px + env(safe-area-inset-bottom));
+    padding: 6px 8px max(6px, env(safe-area-inset-bottom));
     background: color-mix(in srgb, var(--surface) 88%, transparent);
     backdrop-filter: blur(22px) saturate(180%);
     border-top: 1px solid var(--line);
@@ -1775,9 +1890,20 @@ input:checked + .checkbox::after { opacity: 1; transform: rotate(-45deg) scale(1
   .mnav-fab:active { transform: scale(0.94); }
   .mnav-fab svg { width: 24px; height: 24px; stroke-width: 2.4; }
 
+  /* iOS 独立 PWA 视口缺口补偿：布局视口比屏幕矮一个状态栏高度（顶部锚定），
+   * 贴底 / 满高元素会被悬在屏幕底上方。--icb-deficit 由内联脚本按
+   * 「屏幕高 − 视口高」写入（浏览器里恒为 0），把这一段补回去；
+   * env(safe-area-inset-*) 保持不动，与缺口各管各的。 */
+  .mobile-nav { bottom: calc(0px - var(--icb-deficit, 0px)); }
+  .app, .sidebar, .main { height: calc(100dvh + var(--icb-deficit, 0px)); }
+  .sidebar { bottom: calc(0px - var(--icb-deficit, 0px)); }
+  .scrim, .modal { height: calc(100% + var(--icb-deficit, 0px)); }
+  .detail { bottom: calc(0px - var(--icb-deficit, 0px)); }
+
   /* 详情 → 底部抽屉全屏 */
   .detail {
-    top: auto; left: 0; right: 0; bottom: 0;
+    top: auto; left: 0; right: 0;
+    bottom: calc(0px - var(--icb-deficit, 0px));
     width: 100%; max-width: none;
     height: 92dvh;
     border-left: 0;
@@ -1836,6 +1962,8 @@ input:checked + .checkbox::after { opacity: 1; transform: rotate(-45deg) scale(1
   .cover-grid { grid-template-columns: repeat(auto-fill, minmax(68px, 1fr)); max-height: 38vh; gap: 8px; }
   .cover-item span { display: none; }
   .cover-pick { gap: 10px; }
+  .tvdb-bar { flex-wrap: wrap; }
+  .tvdb-bar input[type='text'] { flex: 1 1 100%; }
 
   .state-view { padding: 54px 20px; }
 }
@@ -1853,3 +1981,328 @@ input:checked + .checkbox::after { opacity: 1; transform: rotate(-45deg) scale(1
     transition-duration: 0.01ms !important;
   }
 }
+
+/* ══════════════════════════════════════════════════════════
+   媒体预览（详情页文件列表 → 在线看图 / 播视频音频）
+   ══════════════════════════════════════════════════════════ */
+
+.file-row .f-name.is-media {
+  cursor: pointer;
+  color: var(--accent);
+  text-decoration: underline dotted color-mix(in srgb, var(--accent) 55%, transparent);
+  text-underline-offset: 3px;
+}
+.file-row .f-name.is-media:active { opacity: 0.7; }
+
+/* 文件页顶部的媒体入口 */
+.d-media-bar {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  padding: 10px 8px 4px;
+}
+.d-media-btn {
+  display: inline-flex;
+  align-items: center;
+  gap: 7px;
+  height: 32px;
+  padding: 0 11px;
+  border: 1px solid var(--line-strong);
+  border-radius: 999px;
+  background: var(--surface-2);
+  color: var(--text);
+  font: inherit;
+  font-size: 12px;
+  font-weight: 600;
+  cursor: pointer;
+  transition: var(--fast);
+}
+.d-media-btn:hover {
+  border-color: var(--accent);
+  color: var(--accent);
+  background: var(--surface-3);
+}
+.d-media-btn svg { width: 15px; height: 15px; }
+.d-media-btn b {
+  padding: 1px 7px;
+  border-radius: 999px;
+  background: var(--surface-3);
+  color: var(--text-mute);
+  font-size: 11px;
+  font-variant-numeric: tabular-nums;
+}
+
+body.mv-open { overflow: hidden; }
+
+.media-viewer {
+  position: fixed;
+  inset: 0;
+  z-index: 190;
+  display: flex;
+  flex-direction: column;
+  /* 看图 / 看视频固定用深色底：浅色主题下也别让背后的页面透上来抢画面 */
+  background: rgba(6, 8, 12, 0.93);
+  backdrop-filter: blur(12px);
+  -webkit-backdrop-filter: blur(12px);
+  padding-top: env(safe-area-inset-top);
+  animation: mv-in var(--fast);
+  outline: none;
+}
+@keyframes mv-in {
+  from { opacity: 0; }
+  to { opacity: 1; }
+}
+.mv-bar {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 10px 12px;
+  flex: none;
+}
+.mv-title {
+  flex: 1;
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+.mv-name {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-size: 13px;
+  font-weight: 600;
+  color: #f4f6fb;
+  text-shadow: 0 1px 2px rgba(0, 0, 0, 0.4);
+}
+.mv-sub {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-size: 11px;
+  color: rgba(232, 238, 250, 0.62);
+  font-variant-numeric: tabular-nums;
+}
+.mv-btn {
+  width: 34px;
+  height: 34px;
+  flex: none;
+  border-radius: 50%;
+  border: 1px solid rgba(255, 255, 255, 0.18);
+  background: rgba(255, 255, 255, 0.1);
+  color: #fff;
+  display: grid;
+  place-items: center;
+  cursor: pointer;
+  text-decoration: none;
+  transition: var(--fast);
+}
+.mv-btn:hover { background: rgba(255, 255, 255, 0.2); color: #fff; }
+.mv-btn:disabled { opacity: 0.35; cursor: default; }
+.mv-btn svg { width: 15px; height: 15px; }
+
+/* 图片缩放控件 */
+.mv-zoomctl { display: flex; align-items: center; gap: 3px; flex: none; }
+.mv-zoomctl[hidden] { display: none; }
+.mv-zoom-btn { width: 30px; height: 30px; }
+.mv-zoom-btn svg { width: 14px; height: 14px; }
+.mv-zoomval {
+  min-width: 40px;
+  padding: 0 4px;
+  border: 0;
+  background: transparent;
+  color: rgba(232, 238, 250, 0.72);
+  font: inherit;
+  font-size: 11px;
+  font-variant-numeric: tabular-nums;
+  cursor: pointer;
+}
+.mv-zoomval:hover { color: #fff; }
+
+.mv-stage {
+  position: relative;
+  flex: 1;
+  min-height: 0;
+  display: grid;
+  place-items: center;
+  padding: 0 16px calc(16px + env(safe-area-inset-bottom));
+  /* 放大后的图片不能盖住顶栏；裁切在舞台内，拖动查看被裁掉的部分 */
+  overflow: hidden;
+}
+.mv-stage video {
+  max-width: 100%;
+  max-height: 100%;
+  width: auto;
+  height: auto;
+  border-radius: var(--radius-lg);
+  background: #000;
+  box-shadow: var(--shadow-lg);
+}
+.mv-stage img {
+  max-width: 100%;
+  max-height: 100%;
+  object-fit: contain;
+  border-radius: var(--radius-lg);
+  box-shadow: var(--shadow-lg);
+}
+
+/* 缩放层：图片在层内居中，整层做 translate + scale，原点固定为中心 */
+.mv-zoom {
+  position: absolute;
+  inset: 0;
+  display: grid;
+  place-items: center;
+  transform-origin: center center;
+  will-change: transform;
+  touch-action: none;
+}
+.mv-zoom img {
+  max-width: 100%;
+  max-height: 100%;
+  object-fit: contain;
+  user-select: none;
+  -webkit-user-drag: none;
+}
+.media-viewer.is-zoomed .mv-stage { cursor: grab; }
+.media-viewer.is-dragging .mv-stage { cursor: grabbing; }
+
+.mv-stage audio { width: min(560px, 100%); }
+.mv-stage.is-loading::after {
+  content: '';
+  position: absolute;
+  inset: 0;
+  margin: auto;
+  width: 28px;
+  height: 28px;
+  border: 2px solid rgba(255, 255, 255, 0.25);
+  border-top-color: #fff;
+  border-radius: 50%;
+  animation: mv-spin 0.8s linear infinite;
+}
+@keyframes mv-spin { to { transform: rotate(360deg); } }
+
+/* 视频缓冲提示：开始播放 / 可播后隐藏，卡顿再出现 */
+.mv-buffering {
+  position: absolute;
+  inset: 0;
+  z-index: 1;
+  display: none;
+  grid-auto-flow: row;
+  place-items: center;
+  align-content: center;
+  gap: 10px;
+  color: rgba(232, 238, 250, 0.7);
+  font-size: 12px;
+  pointer-events: none;
+}
+.mv-buffering.is-on { display: grid; }
+.mv-buffering i {
+  width: 26px;
+  height: 26px;
+  border: 2px solid rgba(255, 255, 255, 0.25);
+  border-top-color: #fff;
+  border-radius: 50%;
+  animation: mv-spin 0.8s linear infinite;
+}
+
+.mv-nav {
+  position: absolute;
+  top: 50%;
+  transform: translateY(-50%);
+  width: 42px;
+  height: 42px;
+  z-index: 1;
+  border-radius: 50%;
+  border: 1px solid rgba(255, 255, 255, 0.18);
+  background: rgba(255, 255, 255, 0.1);
+  color: #fff;
+  display: grid;
+  place-items: center;
+  cursor: pointer;
+  box-shadow: var(--shadow-lg);
+  transition: var(--fast);
+}
+.mv-nav:hover { background: rgba(255, 255, 255, 0.2); color: #fff; }
+.mv-nav[hidden] { display: none; }
+.mv-nav svg { width: 18px; height: 18px; }
+.mv-prev { left: max(10px, env(safe-area-inset-left)); }
+.mv-next { right: max(10px, env(safe-area-inset-right)); }
+.mv-prev svg { transform: rotate(180deg); }
+
+.mv-fallback {
+  max-width: 420px;
+  padding: 24px;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 12px;
+  text-align: center;
+  border: 1px solid rgba(255, 255, 255, 0.14);
+  border-radius: var(--radius-lg);
+  background: rgba(18, 22, 30, 0.96);
+  box-shadow: var(--shadow-lg);
+}
+.mv-fallback > svg { width: 30px; height: 30px; color: var(--warn); }
+.mv-fallback p { margin: 0; font-size: 13px; line-height: 1.6; color: rgba(232, 238, 250, 0.75); }
+.mv-fallback-actions { display: flex; flex-wrap: wrap; justify-content: center; gap: 8px; }
+.mv-fallback .btn-ghost { color: #e8eef9; border-color: rgba(255, 255, 255, 0.22); }
+.mv-fallback .btn-ghost:hover { background: rgba(255, 255, 255, 0.12); }
+
+@media (max-width: 600px) {
+  .mv-nav { width: 38px; height: 38px; }
+  .mv-stage { padding-inline: 8px; }
+}
+/* ══════════════════════════════════════════════════════════
+   批量刮削进度（设置 → TheTVDB 刮削）
+   ══════════════════════════════════════════════════════════ */
+
+.scrape-box {
+  margin: 10px 0 2px;
+  padding: 10px 12px;
+  border: 1px solid var(--line);
+  border-radius: var(--radius-sm);
+  background: var(--surface-2);
+}
+.scrape-top {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 10px;
+  font-size: 12px;
+}
+.scrape-now {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  color: var(--text);
+}
+.scrape-count {
+  flex: none;
+  color: var(--text-mute);
+  font-variant-numeric: tabular-nums;
+}
+.scrape-bar {
+  height: 6px;
+  margin: 9px 0;
+  border-radius: 999px;
+  background: var(--track);
+  overflow: hidden;
+}
+.scrape-bar > i {
+  display: block;
+  width: 0;
+  height: 100%;
+  border-radius: 999px;
+  background: var(--accent);
+  transition: width 160ms var(--ease);
+}
+.scrape-bot {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+  font-size: 12px;
+  color: var(--text-dim);
+}
+.scrape-stat { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }

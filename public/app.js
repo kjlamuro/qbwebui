@@ -11,6 +11,8 @@ const LS = {
   interval: 'qb.interval',
   creds: 'qb.creds',
   thumbs: 'qb.thumbs',
+  kinds: 'qb.kinds',
+  listTitle: 'qb.listTitle',
 };
 
 const config = { target: '' };
@@ -41,7 +43,17 @@ const state = {
   /* 封面：自定义图 > 目录自动图 > 类型图标 */
   coverOn: localStorage.getItem('qb.thumbs') !== '0',
   coverV: new Map(),    // hash -> 版本号，用于刷新图片缓存
-  coverMode: new Map(), // hash -> custom | auto | icon
+  coverMode: new Map(), // hash -> custom | tvdb | auto | icon
+  coverFlag: new Map(), // hash -> 1 有封面 / 0 明确没有（后端只读缓存给的结论，缺省=还没问过）
+  coverAsked: new Set(), // 已经问过「有没有封面」的 hash
+  coverKind: new Map(), // hash -> video | audio | image | book | archive | other（后端按文件权重判定）
+  kindAsked: new Set(), // 已经问过后端的 hash
+  kindAt: 0,
+  /* TheTVDB 刮削：是否可用由服务端决定（密钥在服务端，页面不持有） */
+  tvdb: { enabled: false, configured: false, auto: 'off', lang: 'zho' },
+  /* 列表标题：off = 原始文件名；media = 媒体名为主；original = 原始名为主（媒体名做副标题） */
+  listTitleMode: localStorage.getItem('qb.listTitle') || 'off',
+  mediaTitles: new Map(), // hash -> { name, year, type }（刮削到的媒体数据）
 };
 
 /* ── 格式化 ───────────────────────────────────────────── */
@@ -204,17 +216,141 @@ const rowCache = new Map();
 
 /* ══════════ 封面缩略图 ══════════ */
 /* 解析顺序：自定义上传图 → 种子目录里自动找到的图 → 类型图标（兜底） */
-const COVER_KINDS = [
-  { kind: 'music', icon: 'i-music', re: /(music|audio|album|ost|flac|ape|dts|soundtrack|音乐|专辑|歌曲|演唱会|无损|原声)/i },
-  { kind: 'image', icon: 'i-image', re: /(photo|image|picture|wallpaper|comic|manga|画集|摄影|图片|壁纸|漫画|写真|绘本|图册)/i },
-  { kind: 'film', icon: 'i-film', re: /(movie|film|tv|series|episode|video|anime|documentary|电影|影视|剧集|动画|番剧|综艺|纪录片|视频|纪录)/i },
-  { kind: 'archive', icon: 'i-archive', re: /(software|game|iso|ebook|course|tutorial|软件|游戏|应用|书籍|电子书|课程|教程|文档|教材|学习|素材)/i },
+
+/* 类型由后端按「目录 / 种子文件清单里各类文件的体积权重」判定，
+   前端只在还没拿到结果（或拿不到）时，用分类和名字先猜一个顶着 */
+const KIND_META = {
+  video: { cls: 'film', icon: 'i-film', label: '视频' },
+  audio: { cls: 'music', icon: 'i-music', label: '音乐' },
+  image: { cls: 'image', icon: 'i-image', label: '图片' },
+  book: { cls: 'book', icon: 'i-book', label: '书籍' },
+  archive: { cls: 'archive', icon: 'i-archive', label: '压缩包 / 镜像' },
+  other: { cls: 'other', icon: 'i-inbox', label: '其他' },
+};
+
+const KIND_GUESS = [
+  { kind: 'audio', re: /(music|audio|album|ost|flac|ape|dts|soundtrack|音乐|专辑|歌曲|演唱会|无损|原声)/i },
+  { kind: 'image', re: /(photo|image|picture|wallpaper|comic|manga|画集|摄影|图片|壁纸|漫画|写真|绘本|图册)/i },
+  { kind: 'video', re: /(movie|film|tv|series|episode|video|anime|documentary|电影|影视|剧集|动画|番剧|综艺|纪录片|视频|纪录)/i },
+  { kind: 'book', re: /(ebook|book|pdf|epub|manga|书籍|电子书|小说|漫画|教材|画册)/i },
+  { kind: 'archive', re: /(software|game|iso|zip|rar|7z|dmg|course|tutorial|软件|游戏|应用|课程|教程|文档|素材)/i },
 ];
 
 function coverKind(t) {
+  const known = state.coverKind.get(t.hash);
+  // 后端说「other」只表示没判出来，这时名字/分类的猜测更靠谱，别拿它盖掉猜测
+  if (known && known !== 'other' && KIND_META[known]) return KIND_META[known];
   const hay = `${t.category || ''} ${t.name || ''} ${t.tags || ''}`;
-  for (const k of COVER_KINDS) if (k.re.test(hay)) return k;
-  return { kind: 'other', icon: 'i-inbox' };
+  for (const g of KIND_GUESS) if (g.re.test(hay)) return KIND_META[g.kind];
+  return KIND_META[known] || KIND_META.other;
+}
+
+/**
+ * 向后端批量问类型 + 有没有封面。一次请求拿完当前列表里还不知道的 hash，
+ * 结果回填后只重画受影响的行，2 秒一次的轮询不会重复发请求。
+ * 「有没有封面」是为了不再对没有图的种子发 /__cover/img —— 那会 404 一片红。
+ */
+let kindsBusy = false;
+async function ensureKinds() {
+  if (kindsBusy || !state.coverOn || !state.list.length) return;
+  const now = Date.now();
+  if (now - state.kindAt > 300_000) { state.kindAsked.clear(); state.coverAsked.clear(); state.kindAt = now; } // 目录内容会变，5 分钟复查一次
+  const needKind = state.list.map((t) => t.hash).filter((h) => !state.coverKind.has(h) && !state.kindAsked.has(h));
+  /* 类型可能是从 localStorage 预填的（首屏就有图标），但封面结论一定得问一次，
+     否则每行还是会去试图片、继续 404 */
+  const needCover = state.list.map((t) => t.hash).filter((h) => !state.coverFlag.has(h) && !state.coverAsked.has(h));
+  const batch = [...new Set([...needKind, ...needCover])].slice(0, 120);
+  if (!batch.length) return;
+  kindsBusy = true;
+  try {
+    const res = await fetch('/__cover/kinds', {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ hashes: batch }),
+    });
+    const data = await res.json();
+    const kinds = data?.kinds || {};
+    const covers = data?.covers || {};
+    // 成功拿到回执才记账：失败要留给下一轮重试，否则这一批封面就永远不加载了
+    batch.forEach((h) => { state.kindAsked.add(h); state.coverAsked.add(h); });
+    let changed = false;
+    for (const h of batch) {
+      const k = kinds[h] || 'other';
+      if (state.coverKind.get(h) !== k) { state.coverKind.set(h, k); changed = true; }
+      const f = covers[h];
+      if ((f === 0 || f === 1) && state.coverFlag.get(h) !== f) { state.coverFlag.set(h, f); changed = true; }
+    }
+    saveKinds(); // 记住这一轮的结果，下次开页面首屏就有类型
+    if (changed) {
+      for (const el of rowCache.values()) el._v.coverKey = null;
+      renderRows();
+      if (state.detailHash) renderDetail();
+    }
+  } catch {
+    batch.forEach((h) => { state.kindAsked.delete(h); state.coverAsked.delete(h); }); // 下轮重试
+  } finally {
+    kindsBusy = false;
+  }
+}
+
+/**
+ * 添加种子后立刻把类型写进后端缓存。
+ * qBittorrent 收下种子就已有文件清单（元数据不依赖下载进度），所以这一步能当场定下
+ * 类型：新行一出现就是对的图标，不用等下一次轮询去扫目录，缓存里也就有了第一条记录。
+ */
+async function seedKinds(hashes, hint = {}) {
+  if (!hashes.length) return hashes;
+  try {
+    const res = await fetch('/__cover/seed', {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ hashes, name: hint.name || '', category: hint.category || '' }),
+    });
+    const kinds = (await res.json()).kinds || {};
+    let changed = false;
+    for (const h of hashes) {
+      const k = kinds[h];
+      if (!k) continue;
+      state.kindAsked.add(h);
+      if (state.coverKind.get(h) !== k) { state.coverKind.set(h, k); changed = true; }
+    }
+    saveKinds();
+    if (changed) {
+      for (const el of rowCache.values()) el._v.coverKey = null;
+      renderRows();
+      if (state.detailHash) renderDetail();
+    }
+  } catch { /* 写不进去也不影响，下次轮询会补上 */ }
+  return hashes;
+}
+
+/**
+ * 类型也存一份在浏览器里。
+ * 后端缓存命中时几毫秒就能返回，但首屏还是会用「名字猜」渲染一帧再翻成真图标；
+ * 记住上次的结果后，刷新页面第一帧就是对的（类型基本不变，后端每轮仍会校准）。
+ */
+function loadKinds() {
+  try {
+    const raw = JSON.parse(localStorage.getItem(LS.kinds) || '{}');
+    for (const [h, k] of Object.entries(raw)) if (KIND_META[k]) state.coverKind.set(h, k);
+  } catch { /* 坏数据就当没有 */ }
+}
+
+let kindsSaveTimer = null;
+function saveKinds() {
+  clearTimeout(kindsSaveTimer);
+  kindsSaveTimer = setTimeout(() => {
+    if (!state.list.length) return; // 列表还没到就别写，否则会把记住的类型清空
+    try {
+      const out = {};
+      // 只留当前列表里的，避免删掉的种子越攒越多
+      for (const t of state.list) {
+        const k = state.coverKind.get(t.hash);
+        if (k) out[t.hash] = k;
+      }
+      localStorage.setItem(LS.kinds, JSON.stringify(out));
+    } catch { /* 存不下就算了，下次重新问后端 */ }
+  }, 2000);
 }
 
 const coverUrl = (hash) => `/__cover/img?hash=${hash}&v=${state.coverV.get(hash) || 0}`;
@@ -240,6 +376,7 @@ function setCoverOn(on, render = true) {
   if (!render) return;
   for (const el of rowCache.values()) el._v.coverKey = null;
   renderRows();
+  if (on) ensureKinds(); // 关着的时候没必要问类型
 }
 
 const SORTERS = {
@@ -262,7 +399,8 @@ function visibleTorrents() {
     else if (state.category && t.category !== state.category) return false;
     if (state.tag && !(t.tags || '').split(',').map((s) => s.trim()).includes(state.tag)) return false;
     if (q) {
-      const hay = `${t.name} ${t.category} ${t.tags} ${t.hash}`.toLowerCase();
+      const mt = state.mediaTitles.get(t.hash);
+      const hay = `${t.name} ${mt?.name || ''} ${t.category} ${t.tags} ${t.hash}`.toLowerCase();
       if (!hay.includes(q)) return false;
     }
     return true;
@@ -287,7 +425,7 @@ function createRow(t) {
     <div class="cell check"><label class="check-wrap"><input type="checkbox" /><span class="checkbox"></span></label></div>
     <div class="cell name">
       <div class="thumb" data-act="cover" title="更换封面"><img alt="" loading="lazy" decoding="async" /><svg><use href="#i-inbox"/></svg></div>
-      <div class="t-text"><div class="t-name"></div><div class="t-sub"></div></div>
+      <div class="t-text"><div class="t-name"></div><span class="t-media" hidden></span><div class="t-sub"></div></div>
     </div>
     <div class="cell size"></div>
     <div class="cell prog"><div class="pbar"><i></i></div><div class="ptext"></div></div>
@@ -305,6 +443,7 @@ function createRow(t) {
     thumbImg: $('.thumb img', el),
     thumbIco: $('.thumb svg use', el),
     name: $('.t-name', el),
+    mediaName: $('.t-media', el),
     sub: $('.t-sub', el),
     size: $('.size', el),
     pbar: $('.pbar', el),
@@ -330,21 +469,50 @@ function updateRow(el, t) {
   const v = el._v;
   const st = statusOf(t);
 
-  const coverKey = `${state.coverOn ? 1 : 0}|${state.coverV.get(t.hash) || 0}|${coverKind(t).kind}|${state.coverMode.get(t.hash) || ''}`;
+  /* 后端说这个种子没有封面就别发图片请求了（以前每行都试一次，404 一片红）。
+     刚上传 / 刚套用 TVDB 海报的那种一定是有图的，不受旧结论影响。 */
+  const coverMode = state.coverMode.get(t.hash);
+  const coverForced = coverMode === 'custom' || coverMode === 'tvdb';
+  const coverFlag = state.coverFlag.get(t.hash);
+  const coverKey = `${state.coverOn ? 1 : 0}|${state.coverV.get(t.hash) || 0}|${coverKind(t).kind}|${coverMode || ''}|${coverForced ? 1 : (coverFlag ?? '?')}`;
   if (v.coverKey !== coverKey) {
     v.coverKey = coverKey;
     const k = coverKind(t);
-    r.thumb.className = `thumb k-${k.kind}`;
+    r.thumb.className = `thumb k-${k.cls}`;
     r.thumbIco.setAttribute('href', `#${k.icon}`);
     r.thumb.classList.remove('has-img');
-    if (state.coverOn && state.coverMode.get(t.hash) !== 'icon') {
+    if (state.coverOn && coverMode !== 'icon' && (coverForced || coverFlag === 1)) {
       r.thumbImg.src = coverUrl(t.hash);
     } else {
       r.thumbImg.removeAttribute('src');
     }
   }
 
-  if (v.name !== t.name) { r.name.textContent = t.name; r.name.title = t.name; v.name = t.name; }
+  // 列表标题：按设置决定用原始文件名还是刮削到的 TVDB 媒体名，另一方做副标题
+  const mt = state.mediaTitles.get(t.hash);
+  const mediaName = mt?.name ? (mt.year ? `${mt.name} (${mt.year})` : mt.name) : '';
+  const titleKey = `${state.listTitleMode}|${mediaName}|${t.name}`;
+  if (v.titleKey !== titleKey) {
+    v.titleKey = titleKey;
+    const mode = state.listTitleMode;
+    const useMedia = mode !== 'off' && mediaName && mediaName !== t.name;
+    if (!useMedia) {
+      r.name.textContent = t.name;
+      r.name.title = t.name;
+      r.mediaName.hidden = true;
+      r.mediaName.textContent = '';
+    } else if (mode === 'media') {
+      r.name.textContent = mediaName;
+      r.name.title = t.name; // 悬停可看原始文件名
+      r.mediaName.hidden = false;
+      r.mediaName.textContent = t.name;
+    } else { // original：原始名为主，媒体名为副
+      r.name.textContent = t.name;
+      r.name.title = t.name;
+      r.mediaName.hidden = false;
+      r.mediaName.textContent = mediaName;
+    }
+  }
 
   const catKey = `${t.category}|${t.tags}`;
   if (v.cat !== catKey) {
@@ -523,18 +691,55 @@ function renderServer() {
 let pollTimer = null;
 let polling = false;
 
+/**
+ * 列表数据只由 /sync/maindata 的增量维护：首帧 rid=0 拿全量（和 info 一样大，但仅此一次），
+ * 之后每轮只回变化的字段（几百字节）。全量 /torrents/info 只在首帧之外、遇到未知 hash
+ * （增量补不齐）时兜底拉一次——种子多的时候它一次就是近 500KB，没必要每轮都拉。
+ */
+function applySync(sync) {
+  /* 全量更新（首帧或 qB 重连后）就换一张空表，免得留下已经删掉的种子。
+     必须把新表写回 state.map —— 之前只在局部变量里换表、只更新 state.list，
+     结果 state.map 一直停在初始的空表上：按 hash 查详情的抽屉整块空白，
+     多选后 updateRow 也拿不到数据。 */
+  if (sync.full_update) state.map = new Map();
+  const map = state.map;
+  let unknown = false;
+  for (const [hash, patch] of Object.entries(sync.torrents || {})) {
+    const prev = map.get(hash);
+    if (!prev && !sync.full_update) unknown = true; // 没底子的增量，补一次全量更稳妥
+    map.set(hash, { ...(prev || {}), ...patch, hash });
+  }
+  for (const hash of sync.torrents_removed || []) map.delete(hash);
+  if (sync.categories) state.categories = { ...state.categories, ...sync.categories };
+  if (sync.categories_removed?.length) {
+    const next = { ...state.categories };
+    for (const c of sync.categories_removed) delete next[c];
+    state.categories = next;
+  }
+  state.list = [...map.values()];
+  return unknown;
+}
+
+async function refreshFullList() {
+  const torrents = await apiJson('/torrents/info');
+  if (!Array.isArray(torrents)) throw new Error('bad list');
+  state.list = torrents;
+  state.map = new Map(torrents.map((t) => [t.hash, t]));
+}
+
 async function tick() {
   if (polling) return;
   polling = true;
   try {
-    const [torrents, sync] = await Promise.all([
-      apiJson('/torrents/info'),
-      apiJson(`/sync/maindata?rid=${state.rid}`),
-    ]);
-    if (Array.isArray(torrents)) {
-      state.list = torrents;
-      state.map = new Map(torrents.map((t) => [t.hash, t]));
+    const sync = await apiJson(`/sync/maindata?rid=${state.rid}`);
+    if (!sync || typeof sync !== 'object') throw new Error('bad sync');
+    const unknown = applySync(sync);
+    if (sync.server_state) {
+      // 增量响应里 server_state 只包含变化的字段，需要合并
+      state.server = { ...state.server, ...sync.server_state };
     }
+    if (sync.rid) state.rid = sync.rid;
+    if (unknown || !state.list.length) await refreshFullList();
     if (state.pending.size) {
       const now = Date.now();
       for (const [h, p] of state.pending) {
@@ -543,15 +748,16 @@ async function tick() {
         if (t) t.state = p.state;
       }
     }
-    if (sync && sync.server_state) {
-      // 增量响应里 server_state 只包含变化的字段，需要合并
-      state.server = { ...state.server, ...sync.server_state };
-      if (sync.rid) state.rid = sync.rid;
-    }
     state.firstLoad = false;
-    renderRows();
-    renderServer();
-    if (state.detailHash) refreshDetailShell();
+    try {
+      renderRows();
+      renderServer();
+      ensureKinds();
+      if (state.detailHash) refreshDetailShell();
+    } catch (err) {
+      // 渲染层的 bug 不该被当成「连接断开」，打到控制台方便定位
+      console.error('[render]', err);
+    }
   } catch (err) {
     if (!err.unauthorized) {
       state.connected = false;
@@ -736,6 +942,7 @@ const detailEl = $('#detail');
 const detailScrim = $('#detailScrim');
 
 async function openDetail(hash) {
+  closeViewer(); // 换种子时别把上一个种子的预览留在屏幕上
   state.detailHash = hash;
   state.detailData = null;
   state.detailTab = 'files';
@@ -758,6 +965,7 @@ async function openDetail(hash) {
 
 function closeDetail() {
   state.detailHash = null;
+  closeViewer(); // 详情关了，预览也不该留着
   detailEl.classList.remove('is-open');
   detailEl.setAttribute('aria-hidden', 'true');
   detailScrim.classList.remove('is-open');
@@ -779,6 +987,496 @@ function ringSvg(progress, key) {
     </svg>
     <span>${(progress * 100).toFixed(0)}%</span>
   </div>`;
+}
+
+/* ══════════ 媒体预览：详情页里直接看图 / 播视频音频 ══════════ */
+
+const MEDIA_KIND_EXTS = {
+  video: new Set(['.mp4', '.m4v', '.webm', '.mkv', '.mov', '.m2ts', '.ts', '.avi', '.wmv', '.flv', '.mpg', '.mpeg', '.3gp', '.3g2']),
+  audio: new Set(['.mp3', '.flac', '.m4a', '.aac', '.ogg', '.oga', '.opus', '.wav', '.aiff', '.aif']),
+  image: new Set(['.jpg', '.jpeg', '.png', '.webp', '.gif', '.avif', '.bmp', '.svg', '.heic', '.heif']),
+};
+
+const MEDIA_LABEL = { image: '图片', video: '视频', audio: '音频' };
+
+function mediaKindOf(name) {
+  const ext = (String(name).match(/\.[a-z0-9]+$/i) || [''])[0].toLowerCase();
+  for (const [kind, set] of Object.entries(MEDIA_KIND_EXTS)) if (set.has(ext)) return kind;
+  return '';
+}
+
+/** 当前种子里同一类型的文件（图片浏览 / 视频连播就在这个列表里前后翻） */
+function mediaFiles(kind) {
+  return (state.detailData?.files || []).filter((f) => mediaKindOf(f.name) === kind);
+}
+
+function mediaUrl(name, download = false) {
+  const q = new URLSearchParams({ hash: state.detailHash || '', name });
+  if (download) q.set('download', '1');
+  return `/__cover/file?${q}`;
+}
+
+let viewerEl = null;
+let viewerState = null; // { kind, files, idx, zoom, drag, touch, pinch, lastTap, ... }
+const ZOOM_MAX = 6;
+
+function openMediaViewer(kind, startName = '') {
+  if (!kind || !state.detailHash) return;
+  const files = mediaFiles(kind);
+  if (!files.length) return;
+  const idx = Math.max(0, files.findIndex((f) => f.name === startName));
+  closeViewer();
+  viewerState = { kind, files, idx, zoom: null, drag: null, touch: null, pinch: null, lastTap: 0, tapX: 0, tapY: 0, suppressClick: false };
+  viewerEl = document.createElement('div');
+  viewerEl.className = 'media-viewer';
+  viewerEl.setAttribute('role', 'dialog');
+  viewerEl.setAttribute('aria-modal', 'true');
+  viewerEl.setAttribute('aria-label', `${MEDIA_LABEL[kind] || '媒体'}预览`);
+  viewerEl.tabIndex = -1;
+  viewerEl.innerHTML = `
+    <div class="mv-bar">
+      <div class="mv-title">
+        <span class="mv-name"></span>
+        <span class="mv-sub"></span>
+      </div>
+      <div class="mv-zoomctl" hidden>
+        <button class="mv-btn mv-zoom-btn" type="button" data-zoom="out" aria-label="缩小"><svg><use href="#i-zoom-out"/></svg></button>
+        <button class="mv-zoomval" type="button" data-zoom="reset" title="恢复原始大小">100%</button>
+        <button class="mv-btn mv-zoom-btn" type="button" data-zoom="in" aria-label="放大"><svg><use href="#i-zoom-in"/></svg></button>
+      </div>
+      <a class="mv-btn mv-dl" aria-label="下载原文件" title="下载原文件"><svg><use href="#i-download"/></svg></a>
+      <button class="mv-btn mv-close" type="button" aria-label="关闭"><svg><use href="#i-x"/></svg></button>
+    </div>
+    <div class="mv-stage"></div>
+    <button class="mv-nav mv-prev" type="button" aria-label="上一个"><svg><use href="#i-chevron-right"/></svg></button>
+    <button class="mv-nav mv-next" type="button" aria-label="下一个"><svg><use href="#i-chevron-right"/></svg></button>`;
+  document.body.appendChild(viewerEl);
+  document.body.classList.add('mv-open');
+  const stage = viewerEl.querySelector('.mv-stage');
+  viewerEl.addEventListener('click', viewerClick);
+  stage.addEventListener('wheel', viewerWheel, { passive: false });
+  stage.addEventListener('dblclick', viewerDblClick);
+  stage.addEventListener('pointerdown', viewerPointerDown);
+  stage.addEventListener('pointermove', viewerPointerMove);
+  stage.addEventListener('pointerup', viewerPointerUp);
+  stage.addEventListener('pointercancel', viewerPointerUp);
+  viewerEl.addEventListener('touchstart', viewerTouchStart, { passive: false });
+  viewerEl.addEventListener('touchmove', viewerTouchMove, { passive: false });
+  viewerEl.addEventListener('touchend', viewerTouchEnd, { passive: false });
+  document.addEventListener('keydown', viewerKey);
+  window.addEventListener('resize', viewerResize);
+  renderViewer();
+  viewerEl.focus({ preventScroll: true });
+}
+
+function renderViewer() {
+  if (!viewerEl || !viewerState) return;
+  const { kind, files, idx } = viewerState;
+  const f = files[idx];
+  if (!f) return;
+  const multi = files.length > 1;
+  const url = mediaUrl(f.name);
+  const baseName = String(f.name).split('/').pop() || f.name;
+
+  const nameEl = viewerEl.querySelector('.mv-name');
+  nameEl.textContent = baseName;
+  nameEl.title = f.name;
+  const sub = [multi ? `${idx + 1} / ${files.length}` : '', fmtBytes(f.size)];
+  if (f.progress != null && f.progress < 1) sub.push(`已下载 ${(f.progress * 100).toFixed(0)}%`);
+  viewerEl.querySelector('.mv-sub').textContent = sub.filter(Boolean).join(' · ');
+  const dl = viewerEl.querySelector('.mv-dl');
+  dl.href = mediaUrl(f.name, true);
+  dl.setAttribute('download', baseName);
+  viewerEl.querySelector('.mv-prev').hidden = !multi;
+  viewerEl.querySelector('.mv-next').hidden = !multi;
+  viewerEl.querySelector('.mv-zoomctl').hidden = kind !== 'image';
+
+  const stage = viewerEl.querySelector('.mv-stage');
+  stage.innerHTML = '';
+  stage.classList.remove('is-loading');
+  viewerState.drag = null;
+  viewerState.touch = null;
+  viewerState.pinch = null;
+  viewerState.zoom = kind === 'image' ? { s: 1, x: 0, y: 0 } : null;
+  let el;
+
+  if (kind === 'video') {
+    el = document.createElement('video');
+    el.controls = true;
+    el.autoplay = true;
+    el.playsInline = true;
+    el.preload = 'metadata';
+    el.src = url;
+    el.addEventListener('error', () => {
+      if (el.isConnected) viewerFallback('浏览器无法直接播放这个视频。MKV / HEVC / 杜比视界等格式通常需要转码，可以下载后用本地播放器打开。');
+    });
+    // 缓冲提示：一开始就显示，能播后消失；中途卡顿再出现
+    const buffering = document.createElement('div');
+    buffering.className = 'mv-buffering is-on';
+    buffering.innerHTML = '<i></i><span>缓冲中…</span>';
+    stage.appendChild(buffering);
+    const showBuf = () => buffering.classList.add('is-on');
+    const hideBuf = () => buffering.classList.remove('is-on');
+    el.addEventListener('canplay', hideBuf);
+    el.addEventListener('playing', hideBuf);
+    el.addEventListener('waiting', showBuf);
+    el.addEventListener('stalled', showBuf);
+  } else if (kind === 'audio') {
+    el = document.createElement('audio');
+    el.controls = true;
+    el.autoplay = true;
+    el.src = url;
+    el.addEventListener('error', () => {
+      if (el.isConnected) viewerFallback('浏览器无法播放这个音频，可能还没下载完成，或编码不受支持。');
+    });
+  } else {
+    const wrap = document.createElement('div');
+    wrap.className = 'mv-zoom';
+    el = document.createElement('img');
+    el.alt = f.name;
+    el.decoding = 'async';
+    el.draggable = false;
+    el.src = url;
+    wrap.appendChild(el);
+    stage.classList.add('is-loading');
+    el.addEventListener('load', () => {
+      stage.classList.remove('is-loading');
+      if (viewerState?.zoom) { clampZoom(); applyZoom(); }
+    });
+    el.addEventListener('error', () => {
+      if (el.isConnected) viewerFallback('这张图片无法显示：可能还没下载完，或浏览器不支持该格式（例如 HEIC）。可以下载后用本地应用打开。');
+    });
+    stage.appendChild(wrap);
+    applyZoom();
+  }
+  if (kind !== 'image') stage.appendChild(el);
+
+  // 预加载前后两张，翻页时不用等
+  if (kind === 'image' && multi) {
+    for (const d of [-1, 1]) {
+      const n = files[(idx + d + files.length) % files.length];
+      if (n) { const im = new Image(); im.src = mediaUrl(n.name); }
+    }
+  }
+}
+
+/* ── 图片缩放 / 平移 ─────────────────────────────────── */
+
+function applyZoom() {
+  if (!viewerEl || !viewerState?.zoom) return;
+  const z = viewerState.zoom;
+  const wrap = viewerEl.querySelector('.mv-zoom');
+  if (wrap) wrap.style.transform = `translate3d(${z.x.toFixed(1)}px, ${z.y.toFixed(1)}px, 0) scale(${z.s.toFixed(4)})`;
+  viewerEl.classList.toggle('is-zoomed', z.s > 1.001);
+  const val = viewerEl.querySelector('.mv-zoomval');
+  if (val) val.textContent = `${Math.round(z.s * 100)}%`;
+  for (const btn of viewerEl.querySelectorAll('[data-zoom]')) {
+    if (btn.dataset.zoom === 'in') btn.disabled = z.s >= ZOOM_MAX - 0.001;
+    else if (btn.dataset.zoom === 'out') btn.disabled = z.s <= 1.001;
+  }
+}
+
+function clampZoom(z = viewerState?.zoom) {
+  if (!z) return;
+  z.s = Math.min(ZOOM_MAX, Math.max(1, z.s));
+  if (z.s <= 1.001) {
+    z.s = 1;
+    z.x = 0;
+    z.y = 0;
+    return;
+  }
+  const stage = viewerEl?.querySelector('.mv-stage');
+  const img = stage?.querySelector('.mv-zoom img');
+  const maxX = stage && img ? Math.max(0, (img.offsetWidth * z.s - stage.clientWidth) / 2) : 0;
+  const maxY = stage && img ? Math.max(0, (img.offsetHeight * z.s - stage.clientHeight) / 2) : 0;
+  z.x = Math.min(maxX, Math.max(-maxX, z.x));
+  z.y = Math.min(maxY, Math.max(-maxY, z.y));
+}
+
+function zoomAt(next, clientX, clientY) {
+  if (!viewerEl || !viewerState?.zoom) return;
+  const stage = viewerEl.querySelector('.mv-stage');
+  if (!stage) return;
+  const rect = stage.getBoundingClientRect();
+  const mx = clientX - (rect.left + rect.width / 2);
+  const my = clientY - (rect.top + rect.height / 2);
+  const z = viewerState.zoom;
+  const u = (mx - z.x) / z.s;
+  const v = (my - z.y) / z.s;
+  z.s = Math.min(ZOOM_MAX, Math.max(1, next));
+  if (z.s <= 1.001) {
+    z.s = 1;
+    z.x = 0;
+    z.y = 0;
+  } else {
+    z.x = mx - u * z.s;
+    z.y = my - v * z.s;
+    clampZoom(z);
+  }
+  applyZoom();
+}
+
+function zoomBy(factor) {
+  if (!viewerEl || !viewerState?.zoom) return;
+  const stage = viewerEl.querySelector('.mv-stage');
+  if (!stage) return;
+  const rect = stage.getBoundingClientRect();
+  zoomAt(viewerState.zoom.s * factor, rect.left + rect.width / 2, rect.top + rect.height / 2);
+}
+
+function resetZoom() {
+  if (!viewerState?.zoom) return;
+  viewerState.zoom = { s: 1, x: 0, y: 0 };
+  applyZoom();
+}
+
+function viewerResize() {
+  if (!viewerState?.zoom) return;
+  clampZoom();
+  applyZoom();
+}
+
+/* ── 预览交互 ─────────────────────────────────────────── */
+
+function viewerFallback(message) {
+  if (!viewerEl || !viewerState) return;
+  const f = viewerState.files[viewerState.idx];
+  const stage = viewerEl.querySelector('.mv-stage');
+  stage.classList.remove('is-loading');
+  stage.innerHTML = `
+    <div class="mv-fallback">
+      <svg><use href="#i-alert"/></svg>
+      <p>${esc(message)}</p>
+      <div class="mv-fallback-actions">
+        <a class="btn btn-soft btn-sm" href="${mediaUrl(f.name, true)}" download>下载文件</a>
+        <a class="btn btn-ghost btn-sm" href="${mediaUrl(f.name)}" target="_blank" rel="noopener">新标签打开</a>
+      </div>
+    </div>`;
+}
+
+function stepViewer(delta) {
+  if (!viewerState || viewerState.files.length < 2) return;
+  const n = viewerState.files.length;
+  viewerState.idx = (viewerState.idx + delta + n) % n;
+  renderViewer();
+}
+
+function suppressNextClick() {
+  if (!viewerState) return;
+  viewerState.suppressClick = true;
+  clearTimeout(viewerState.suppressTimer);
+  // 防止 preventDefault 没触发 click 时把后续真正的点击也吞掉
+  viewerState.suppressTimer = setTimeout(() => { if (viewerState) viewerState.suppressClick = false; }, 500);
+}
+
+function viewerClick(ev) {
+  if (viewerState?.suppressClick) { viewerState.suppressClick = false; return; }
+  const zoomBtn = ev.target.closest('[data-zoom]');
+  if (zoomBtn) {
+    if (zoomBtn.dataset.zoom === 'in') zoomBy(1.5);
+    else if (zoomBtn.dataset.zoom === 'out') zoomBy(1 / 1.5);
+    else resetZoom();
+    return;
+  }
+  if (ev.target.closest('.mv-close')) { closeViewer(); return; }
+  if (ev.target.closest('.mv-prev')) { stepViewer(-1); return; }
+  if (ev.target.closest('.mv-next')) { stepViewer(1); return; }
+  if (ev.target === viewerEl || ev.target.classList.contains('mv-stage')) closeViewer();
+}
+
+function viewerKey(ev) {
+  if (!viewerState) return;
+  if (ev.key === 'Escape') {
+    ev.preventDefault();
+    closeViewer();
+    return;
+  }
+  if (viewerState.kind === 'image') {
+    if (ev.key === '+' || ev.key === '=') { ev.preventDefault(); zoomBy(1.4); return; }
+    if (ev.key === '-' || ev.key === '_') { ev.preventDefault(); zoomBy(1 / 1.4); return; }
+    if (ev.key === '0') { ev.preventDefault(); resetZoom(); return; }
+  }
+  if (ev.key === 'ArrowLeft' || ev.key === 'ArrowRight') {
+    const tag = document.activeElement?.tagName;
+    if (tag === 'VIDEO' || tag === 'AUDIO') return; // 让播放器自己快进 / 快退
+    if (viewerState.files.length < 2) return;
+    ev.preventDefault();
+    stepViewer(ev.key === 'ArrowLeft' ? -1 : 1);
+  }
+}
+
+function viewerWheel(ev) {
+  if (!viewerState || viewerState.kind !== 'image') return;
+  ev.preventDefault();
+  const d = ev.deltaMode === 1 ? ev.deltaY * 16 : ev.deltaMode === 2 ? ev.deltaY * 120 : ev.deltaY;
+  if (!d) return;
+  zoomAt(viewerState.zoom.s * Math.exp(-d * 0.0015), ev.clientX, ev.clientY);
+}
+
+function viewerDblClick(ev) {
+  if (!viewerState || viewerState.kind !== 'image') return;
+  if (viewerState.zoom.s > 1.001) resetZoom();
+  else zoomAt(2.5, ev.clientX, ev.clientY);
+}
+
+function viewerPointerDown(ev) {
+  if (!viewerState || viewerState.kind !== 'image' || viewerState.zoom.s <= 1.001) return;
+  if (ev.pointerType && ev.pointerType !== 'mouse') return;
+  if (ev.button != null && ev.button !== 0) return;
+  viewerState.drag = { x: viewerState.zoom.x, y: viewerState.zoom.y, cx: ev.clientX, cy: ev.clientY, moved: false };
+  try { ev.currentTarget.setPointerCapture?.(ev.pointerId); } catch { /* 合成事件或指针已释放 */ }
+  viewerEl.classList.add('is-dragging');
+  ev.preventDefault();
+}
+
+function viewerPointerMove(ev) {
+  const d = viewerState?.drag;
+  if (!d) return;
+  const dx = ev.clientX - d.cx;
+  const dy = ev.clientY - d.cy;
+  if (Math.abs(dx) + Math.abs(dy) > 4) { d.moved = true; suppressNextClick(); }
+  const z = viewerState.zoom;
+  z.x = d.x + dx;
+  z.y = d.y + dy;
+  clampZoom(z);
+  applyZoom();
+  ev.preventDefault();
+}
+
+function viewerPointerUp(ev) {
+  if (!viewerState?.drag) return;
+  viewerState.drag = null;
+  viewerEl.classList.remove('is-dragging');
+  try { ev.currentTarget.releasePointerCapture?.(ev.pointerId); } catch { /* 已经释放 */ }
+}
+
+function viewerTouchStart(ev) {
+  if (!viewerState || viewerState.kind !== 'image') return;
+  if (ev.target.closest?.('.mv-bar, .mv-nav')) return;
+  const z = viewerState.zoom;
+  if (ev.touches.length === 2) {
+    const [a, b] = ev.touches;
+    const rect = viewerEl.querySelector('.mv-stage').getBoundingClientRect();
+    viewerState.pinch = {
+      d: Math.hypot(a.clientX - b.clientX, a.clientY - b.clientY) || 1,
+      s: z.s,
+      x: z.x,
+      y: z.y,
+      cx: (a.clientX + b.clientX) / 2 - (rect.left + rect.width / 2),
+      cy: (a.clientY + b.clientY) / 2 - (rect.top + rect.height / 2),
+    };
+    viewerState.touch = null;
+    suppressNextClick();
+    ev.preventDefault();
+    return;
+  }
+  if (ev.touches.length !== 1) return;
+  const t = ev.touches[0];
+  viewerState.touch = { x: t.clientX, y: t.clientY, panX: z.x, panY: z.y, moved: false };
+}
+
+function viewerTouchMove(ev) {
+  if (!viewerState || viewerState.kind !== 'image') return;
+  if (ev.target.closest?.('.mv-bar, .mv-nav')) return;
+  const z = viewerState.zoom;
+  if (viewerState.pinch && ev.touches.length >= 2) {
+    const [a, b] = ev.touches;
+    const p = viewerState.pinch;
+    const rect = viewerEl.querySelector('.mv-stage').getBoundingClientRect();
+    const d = Math.hypot(a.clientX - b.clientX, a.clientY - b.clientY) || 1;
+    const cx = (a.clientX + b.clientX) / 2 - (rect.left + rect.width / 2);
+    const cy = (a.clientY + b.clientY) / 2 - (rect.top + rect.height / 2);
+    const u = (p.cx - p.x) / p.s;
+    const v = (p.cy - p.y) / p.s;
+    z.s = Math.min(ZOOM_MAX, Math.max(1, p.s * d / p.d));
+    z.x = cx - u * z.s;
+    z.y = cy - v * z.s;
+    clampZoom(z);
+    applyZoom();
+    ev.preventDefault();
+    return;
+  }
+  const tr = viewerState.touch;
+  if (!tr || ev.touches.length !== 1) return;
+  const t = ev.touches[0];
+  const dx = t.clientX - tr.x;
+  const dy = t.clientY - tr.y;
+  if (Math.abs(dx) + Math.abs(dy) > 6) tr.moved = true;
+  if (z.s > 1.001) {
+    z.x = tr.panX + dx;
+    z.y = tr.panY + dy;
+    clampZoom(z);
+    applyZoom();
+    suppressNextClick();
+    ev.preventDefault();
+  }
+}
+
+function viewerTouchEnd(ev) {
+  if (!viewerState || viewerState.kind !== 'image') return;
+  if (ev.target.closest?.('.mv-bar, .mv-nav')) return;
+  if (viewerState.pinch) {
+    if (ev.touches.length < 2) {
+      viewerState.pinch = null;
+      viewerState.lastTap = 0;
+      suppressNextClick();
+    }
+    return;
+  }
+  const tr = viewerState.touch;
+  if (!tr) return;
+  const z = viewerState.zoom;
+  const t = ev.changedTouches[0];
+  const dx = t.clientX - tr.x;
+  const dy = t.clientY - tr.y;
+  const moved = tr.moved || Math.abs(dx) > 10 || Math.abs(dy) > 10;
+  viewerState.touch = null;
+  if (moved) {
+    suppressNextClick();
+    ev.preventDefault();
+    if (z.s <= 1.001 && Math.abs(dx) >= 48 && Math.abs(dx) > Math.abs(dy) * 1.2) stepViewer(dx < 0 ? 1 : -1);
+    return;
+  }
+  // 双击 / 双指之外的轻点：桌面用滚轮或按钮，手机用双击放大
+  const now = Date.now();
+  if (now - viewerState.lastTap < 300 && Math.hypot(t.clientX - viewerState.tapX, t.clientY - viewerState.tapY) < 40) {
+    viewerState.lastTap = 0;
+    suppressNextClick();
+    if (z.s > 1.001) resetZoom();
+    else zoomAt(2.5, t.clientX, t.clientY);
+    return;
+  }
+  viewerState.lastTap = now;
+  viewerState.tapX = t.clientX;
+  viewerState.tapY = t.clientY;
+}
+
+function closeViewer() {
+  if (!viewerEl) return;
+  const el = viewerEl;
+  viewerEl = null;
+  viewerState = null;
+  el.remove(); // 移除 DOM 即停掉播放、释放解码器
+  document.body.classList.remove('mv-open');
+  document.removeEventListener('keydown', viewerKey);
+  window.removeEventListener('resize', viewerResize);
+}
+
+/**
+ * 文件页顶部的「浏览图片 / 播放视频」入口。
+ * 图片集里通常有几十上百张，只靠一个个点文件名翻太累，所以这里按类型做前一 / 后一。
+ */
+function mediaBarHtml(files) {
+  const counts = { image: 0, video: 0, audio: 0 };
+  for (const f of files) {
+    const k = mediaKindOf(f.name);
+    if (k) counts[k]++;
+  }
+  const btn = (kind, icon, label) => (counts[kind]
+    ? `<button class="d-media-btn" type="button" data-browse="${kind}"><svg><use href="#${icon}"/></svg><span>${label}</span><b>${counts[kind]}</b></button>`
+    : '');
+  const html = btn('image', 'i-image', '浏览图片') + btn('video', 'i-play', '播放视频') + btn('audio', 'i-music', '播放音频');
+  return html ? `<div class="d-media-bar">${html}</div>` : '';
 }
 
 function refreshDetailShell() {
@@ -838,15 +1536,18 @@ function renderDetail() {
   if (data) {
     if (state.detailTab === 'files') {
       tabContent = files.length
-        ? `<div class="d-list-head">点击左侧方框可跳过 / 恢复该文件</div>` + files.map((f, i) => `
+        ? mediaBarHtml(files) + `<div class="d-list-head">点击左侧方框可跳过 / 恢复该文件；图片 / 视频点文件名可直接预览，也可以连续翻页</div>` + files.map((f, i) => {
+          const kind = mediaKindOf(f.name);
+          return `
           <div class="file-row">
             <button class="f-toggle ${f.priority > 0 ? 'on' : ''}" data-file="${i}" data-priority="${f.priority}">
               <svg><use href="#i-check"/></svg>
             </button>
-            <span class="f-name ${f.priority === 0 ? 'is-skip' : ''}">${esc(f.name)}</span>
+            <span class="f-name ${f.priority === 0 ? 'is-skip' : ''} ${kind ? 'is-media' : ''}" ${kind ? `data-media="${i}" title="点击预览"` : ''}>${esc(f.name)}</span>
             <span class="f-size">${fmtBytes(f.size)}</span>
             <span class="f-prog">${(f.progress * 100).toFixed(0)}%</span>
-          </div>`).join('')
+          </div>`;
+        }).join('')
         : '<div class="d-empty">暂无文件信息</div>';
     } else if (state.detailTab === 'trackers') {
       tabContent = trackers.length
@@ -903,12 +1604,14 @@ function renderDetail() {
   const dCover = body.querySelector('.d-cover');
   if (dCover) {
     const k = coverKind(t);
-    dCover.className = `d-cover k-${k.kind}${state.coverOn ? '' : ' is-off'}`;
+    dCover.className = `d-cover k-${k.cls}${state.coverOn ? '' : ' is-off'}`;
     dCover.querySelector('use').setAttribute('href', `#${k.icon}`);
     const img = dCover.querySelector('img');
     img.addEventListener('load', () => dCover.classList.add('has-img'));
     img.addEventListener('error', () => dCover.classList.remove('has-img'));
-    if (state.coverOn && state.coverMode.get(hash) !== 'icon') img.src = coverUrl(hash);
+    const mode = state.coverMode.get(hash);
+    const forced = mode === 'custom' || mode === 'tvdb';
+    if (state.coverOn && mode !== 'icon' && (forced || state.coverFlag.get(hash) === 1)) img.src = coverUrl(hash);
   }
   body.scrollTop = prevScroll;
 
@@ -923,6 +1626,17 @@ function renderDetail() {
 }
 
 $('#detailBody').addEventListener('click', async (e) => {
+  const browseBtn = e.target.closest('[data-browse]');
+  if (browseBtn) {
+    openMediaViewer(browseBtn.dataset.browse);
+    return;
+  }
+  const mediaEl = e.target.closest('[data-media]');
+  if (mediaEl) {
+    const f = (state.detailData?.files || [])[Number(mediaEl.dataset.media)];
+    if (f) openMediaViewer(mediaKindOf(f.name), f.name);
+    return;
+  }
   if (e.target.closest('[data-detail="cover"]')) { openCoverModal(state.detailHash); return; }
   const tab = e.target.closest('[data-tab]');
   if (tab) {
@@ -1067,7 +1781,7 @@ async function coverPost(path, body, hash = coverHash) {
   return data;
 }
 
-async function uploadCoverFile(hash, file) {
+async function uploadCoverFile(hash, file, quiet = false) {
   if (!/^image\//.test(file.type)) { toast('请选择图片文件', 'err'); return false; }
   if (file.size > 8 * 1024 * 1024) { toast('图片请控制在 8MB 以内', 'err'); return false; }
   try {
@@ -1077,7 +1791,7 @@ async function uploadCoverFile(hash, file) {
     state.coverMode.set(hash, 'custom');
     bumpCover(hash);
     if (coverHash === hash) afterCoverChange(hash);
-    else toast('封面已设置', 'ok');
+    else if (!quiet) toast('封面已设置', 'ok');
     return true;
   } catch (err) {
     toast(err.message || '封面上传失败', 'err');
@@ -1085,12 +1799,38 @@ async function uploadCoverFile(hash, file) {
   }
 }
 
+/** 后端按文件权重视定的类型回填；变了就重画这一行 */
+function setCoverKind(hash, kind) {
+  if (!kind || state.coverKind.get(hash) === kind) return;
+  state.coverKind.set(hash, kind);
+  state.kindAsked.add(hash);
+  const el = rowCache.get(hash);
+  if (el) el._v.coverKey = null;
+  renderRows();
+  if (coverHash === hash) paintCoverBig();
+}
+
+/** 弹窗里把判定依据摆出来，方便看出「为什么是这个图标」 */
+function showCoverKind(hash, weights) {
+  const el = $('#coverKind');
+  if (!el) return;
+  const meta = KIND_META[state.coverKind.get(hash) || 'other'] || KIND_META.other;
+  const w = weights || {};
+  const total = Object.values(w).reduce((a, b) => a + b, 0);
+  let detail = '';
+  if (total > 0) {
+    const top = Object.entries(w).sort((a, b) => b[1] - a[1])[0];
+    detail = ` · 体积占 ${Math.round((top[1] / total) * 100)}%`;
+  }
+  el.textContent = `判定类型：${meta.label}${detail}`;
+}
+
 function paintCoverBig() {
   const t = state.map.get(coverHash);
   if (!t) return;
   const k = coverKind(t);
   const box = $('#coverBig');
-  box.className = `cover-big k-${k.kind}`;
+  box.className = `cover-big k-${k.cls}`;
   box.innerHTML = `<img alt="" /><svg><use href="#${k.icon}"/></svg>`;
   const img = box.querySelector('img');
   img.addEventListener('load', () => box.classList.add('has-img'));
@@ -1103,6 +1843,7 @@ function afterCoverChange(hash = coverHash) {
   bumpCover(hash);
   paintCoverBig();
   loadCoverCandidates(hash);
+  refreshMediaTitles(); // 刮削 / 放弃都可能改媒体名，列表标题跟着变
 }
 
 async function loadCoverCandidates(hash) {
@@ -1120,9 +1861,11 @@ async function loadCoverCandidates(hash) {
     return;
   }
   state.coverMode.set(hash, data.mode);
+  if (data.kind) setCoverKind(hash, data.kind);
+  showCoverKind(hash, data.weights);
   if (!data.dir) {
     // 单文件种子直接躺在共享下载目录里：不去扫别人的图，直接引导上传
-    $('#coverMode').textContent = '当前：类型图标';
+    $('#coverMode').textContent = data.mode === 'custom' ? '当前：自定义图片' : '当前：类型图标';
     $('#coverDir').textContent = '没有独立目录';
     $('#coverCount').textContent = '';
     grid.innerHTML = '<div class="cover-empty">这个种子没有独立目录，为避免误用同目录下别人的图片，目录匹配已跳过。<br>可以自己上传一张。</div>';
@@ -1131,8 +1874,9 @@ async function loadCoverCandidates(hash) {
   }
   $('#coverMode').textContent =
     data.mode === 'custom' ? '当前：自定义图片'
-      : data.mode === 'icon' ? '当前：类型图标'
-        : '当前：自动（目录图片 → 类型图标）';
+      : data.mode === 'tvdb' ? `当前：TheTVDB 刮削${data.tvdb?.year ? `（${data.tvdb.year}）` : ''}`
+        : data.mode === 'icon' ? '当前：类型图标'
+          : '当前：自动（目录图片 → 类型图标）';
   $('#coverDir').textContent = shortPath(data.dir);
   $('#coverCount').textContent = data.count ? `${data.count} 张` : '目录里没找到图片';
   grid.innerHTML = data.items.length
@@ -1155,9 +1899,15 @@ async function openCoverModal(hash) {
   $('#coverDir').textContent = '';
   $('#coverCount').textContent = '';
   $('#coverGrid').innerHTML = '<div class="cover-skel"></div><div class="cover-skel"></div><div class="cover-skel"></div><div class="cover-skel"></div>';
+  $('#tvdbQuery').value = '';
+  $('#tvdbType').value = '';
+  $('#tvdbGrid').innerHTML = '';
+  $('#coverTvdbName').textContent = '';
+  tvdbSetHint('—');
   paintCoverBig();
   openModal('coverModal');
   loadCoverCandidates(hash);
+  loadTvdbPanel(hash);
 }
 
 $('#coverUpload').addEventListener('click', () => $('#coverFile').click());
@@ -1198,6 +1948,204 @@ $('#coverGrid').addEventListener('click', async (e) => {
     toast('封面已更换', 'ok');
   } catch (err) { toast(err.message, 'err'); }
 });
+
+/* ══════════ 封面：TheTVDB 刮削 ══════════ */
+/* 两段式：先搜作品（带一张默认海报），点进去再挑具体哪张海报 */
+
+let tvdbStage = 'cand'; // cand = 搜索结果；art = 某部作品的海报列表
+let tvdbLast = null;    // 当前展开的作品 { id, type, name, year }
+
+function tvdbSetHint(text, busy = false) {
+  const el = $('#coverTvdbHint');
+  if (!el) return;
+  el.textContent = text;
+  el.classList.toggle('is-busy', busy);
+}
+
+function tvdbSkeleton(n = 4) {
+  $('#tvdbGrid').innerHTML = Array.from({ length: n }, () => '<div class="cover-skel"></div>').join('');
+}
+
+function tvdbDisabled(text) {
+  tvdbSetHint(text);
+  $('#tvdbGrid').innerHTML = `<div class="cover-empty">${esc(text)}<br>到「设置 → TheTVDB 刮削」里填上自己的 API Key 就能用。</div>`;
+}
+
+function renderTvdbCandidates(items) {
+  tvdbStage = 'cand';
+  tvdbLast = null;
+  $('#tvdbBack').hidden = true;
+  if (!items.length) {
+    $('#tvdbGrid').innerHTML = '<div class="cover-empty">TheTVDB 上没搜到，换个名字试试（可以只填英文主标题）</div>';
+    return;
+  }
+  $('#tvdbGrid').innerHTML = items.map((it) => `
+    <button class="cover-item tvdb-item" data-id="${esc(it.id)}" data-type="${esc(it.type)}"
+      data-name="${esc(it.name)}" data-en="${esc(it.nameEn || '')}" data-year="${esc(it.year || '')}" title="${esc(it.overview || it.name)}">
+      ${it.image ? `<img src="${esc(it.image)}" alt="" loading="lazy" decoding="async" referrerpolicy="no-referrer" />` : ''}
+      <span class="tvdb-cap"><b>${esc(it.name)}</b><small>${esc(it.type === 'movie' ? '电影' : '剧集')}${it.year ? ` · ${esc(it.year)}` : ''}${it.nameEn && it.nameEn !== it.name ? ` · ${esc(it.nameEn)}` : ''}</small></span>
+    </button>`).join('');
+}
+
+function renderTvdbPosters(items, meta) {
+  tvdbStage = 'art';
+  tvdbLast = meta;
+  $('#tvdbBack').hidden = false;
+  if (!items.length) {
+    $('#tvdbGrid').innerHTML = '<div class="cover-empty">这部作品在 TheTVDB 上还没有海报</div>';
+    return;
+  }
+  $('#tvdbGrid').innerHTML = items.map((a, i) => `
+    <button class="cover-item tvdb-item" data-image="${esc(a.image)}" title="海报 ${i + 1}${a.kind === 'backdrop' ? '（背景图）' : ''}">
+      <img src="${esc(a.thumb || a.image)}" data-full="${esc(a.image)}" alt="" loading="lazy" decoding="async" referrerpolicy="no-referrer" />
+      <span class="tvdb-cap"><small>${a.kind === 'backdrop' ? '背景图' : '海报'} · ${a.lang || '—'}</small></span>
+    </button>`).join('');
+  // 有些作品只有原图、没有缩略图（缩略图 URL 会 404/403），加载失败就退回原图
+  for (const img of $$('#tvdbGrid img[data-full]')) {
+    img.addEventListener('error', () => {
+      if (img.dataset.full && img.src !== img.dataset.full) img.src = img.dataset.full;
+    }, { once: true });
+  }
+}
+
+async function tvdbSearchNow() {
+  if (!coverHash) return;
+  const h = coverHash;
+  const q = $('#tvdbQuery').value.trim();
+  const type = $('#tvdbType').value;
+  tvdbSkeleton();
+  tvdbSetHint('搜索中…', true);
+  try {
+    const res = await fetch(`/__cover/tvdb/search?hash=${h}&q=${encodeURIComponent(q)}&type=${encodeURIComponent(type)}`);
+    const data = await res.json().catch(() => ({}));
+    if (coverHash !== h) return; // 弹窗已经切到别的种子
+    if (!res.ok) throw new Error(data.message || '搜索失败');
+    if (!q && data.parsed?.title && $('#tvdbQuery').value.trim() === '') $('#tvdbQuery').value = data.parsed.title;
+    renderTvdbCandidates(data.items || []);
+    tvdbSetHint(`识别为「${data.parsed?.title || '—'}」${data.parsed?.year ? ` ${data.parsed.year}` : ''}${data.parsed?.season ? ` 第${data.parsed.season}季` : ''} · ${(data.items || []).length} 个结果`);
+  } catch (err) {
+    tvdbSetHint('搜索失败');
+    $('#tvdbGrid').innerHTML = `<div class="cover-empty">${esc(err.message)}</div>`;
+  }
+}
+
+async function tvdbOpenArt(id, type, name, year, nameEn = '') {
+  tvdbSkeleton(6);
+  tvdbSetHint(`读取《${name}》的海报…`, true);
+  try {
+    const res = await fetch(`/__cover/tvdb/art?hash=${coverHash}&id=${encodeURIComponent(id)}&type=${encodeURIComponent(type)}`);
+    const data = await res.json().catch(() => ({}));
+    if (!res.ok) throw new Error(data.message || '读取失败');
+    renderTvdbPosters(data.items || [], { id, type, name, nameEn, year });
+    tvdbSetHint(`《${name}》· ${(data.items || []).length} 张可选，点一张套用`);
+  } catch (err) {
+    tvdbSetHint('读取失败');
+    $('#tvdbGrid').innerHTML = `<div class="cover-empty">${esc(err.message)}</div>`;
+  }
+}
+
+async function tvdbApply(meta) {
+  if (!coverHash) return;
+  try {
+    const res = await fetch(`/__cover/tvdb/apply?hash=${coverHash}`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify(meta),
+    });
+    const data = await res.json().catch(() => ({}));
+    if (!res.ok) throw new Error(data.message || '套用失败');
+    state.coverMode.set(coverHash, 'tvdb');
+    afterCoverChange();
+    $('#coverTvdbName').textContent = meta.name ? `《${meta.name}》` : '';
+    tvdbSetHint(meta.name ? `已套用《${meta.name}》${meta.year ? ` (${meta.year})` : ''}` : '已套用海报');
+    toast('封面已从 TheTVDB 刮削', 'ok');
+  } catch (err) {
+    toast(err.message, 'err');
+  }
+}
+
+$('#tvdbSearch').addEventListener('click', () => tvdbSearchNow());
+$('#tvdbQuery').addEventListener('keydown', (e) => {
+  if (e.key === 'Enter') { e.preventDefault(); tvdbSearchNow(); }
+});
+$('#tvdbType').addEventListener('change', () => { if ($('#tvdbQuery').value.trim()) tvdbSearchNow(); });
+$('#tvdbBack').addEventListener('click', () => tvdbSearchNow());
+
+$('#tvdbPick').addEventListener('click', async () => {
+  if (!coverHash) return;
+  tvdbSkeleton();
+  tvdbSetHint('自动匹配中…', true);
+  try {
+    const res = await fetch('/__cover/tvdb/auto', {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ hash: coverHash }),
+    });
+    const data = await res.json().catch(() => ({}));
+    if (!res.ok) throw new Error(data.message || '匹配失败');
+    const r = (data.results || {})[coverHash] || {};
+    if (r.ok) {
+      state.coverMode.set(coverHash, 'tvdb');
+      afterCoverChange();
+      $('#coverTvdbName').textContent = `《${r.name}》`;
+      tvdbSetHint(`已匹配《${r.name}》${r.year ? ` (${r.year})` : ''} · ${r.type === 'movie' ? '电影' : '剧集'}`);
+      toast(`已匹配《${r.name}》`, 'ok');
+      return;
+    }
+    // 没把握就别硬套，把候选摆出来让用户自己点
+    renderTvdbCandidates(r.items || []);
+    tvdbSetHint(r.items?.length ? '不敢确定是哪一部，挑一个吧' : 'TheTVDB 上没找到匹配的作品');
+  } catch (err) {
+    tvdbSetHint('匹配失败');
+    $('#tvdbGrid').innerHTML = `<div class="cover-empty">${esc(err.message)}</div>`;
+  }
+});
+
+$('#tvdbGrid').addEventListener('click', async (e) => {
+  const item = e.target.closest('.tvdb-item');
+  if (!item || !coverHash) return;
+  if (tvdbStage === 'cand') {
+    tvdbOpenArt(item.dataset.id, item.dataset.type, item.dataset.name, item.dataset.year, item.dataset.en);
+    return;
+  }
+  const base = tvdbLast || {};
+  await tvdbApply({
+    id: base.id,
+    type: base.type,
+    image: item.dataset.image,
+    name: base.name,
+    nameEn: base.nameEn || '',
+    year: base.year,
+  });
+});
+
+/** 打开封面弹窗时把 TVDB 区恢复成初始状态，并顺手按种子名预填片名 */
+async function loadTvdbPanel(hash) {
+  const t = state.map.get(hash);
+  $('#coverTvdbName').textContent = '';
+  $('#tvdbGrid').innerHTML = '';
+  $('#tvdbBack').hidden = true;
+  tvdbStage = 'cand';
+  tvdbLast = null;
+  const h = hash;
+  try {
+    const st = await fetch(`/__cover/tvdb/status?hash=${hash}`).then((r) => r.json());
+    if (coverHash !== h) return;
+    Object.assign(state.tvdb, {
+      enabled: Boolean(st.enabled), configured: Boolean(st.configured), auto: st.auto || 'off', lang: st.lang || 'eng',
+    });
+    if (!st.configured) { tvdbDisabled('还没配置 TheTVDB'); return; }
+    if (!st.enabled) { tvdbDisabled('TheTVDB 刮削已关闭'); return; }
+    $('#tvdbQuery').value = st.parsed?.title || t?.name || '';
+    $('#tvdbType').value = st.parsed?.isSeries ? 'series' : '';
+    if (st.current?.name) {
+      $('#coverTvdbName').textContent = `《${st.current.name}》`;
+      tvdbSetHint(`当前：TheTVDB · ${st.current.type === 'movie' ? '电影' : '剧集'}${st.current.year ? ` ${st.current.year}` : ''}`);
+    } else {
+      tvdbSetHint(st.parsed?.title ? `识别为「${st.parsed.title}」${st.parsed.year ? ` ${st.parsed.year}` : ''}，点「自动匹配」试试` : '—');
+    }
+  } catch { tvdbSetHint('—'); }
+}
 
 /* ══════════ 弹窗基础 ══════════ */
 function openModal(id) {
@@ -1679,6 +2627,8 @@ $('#addSubmit').addEventListener('click', async () => {
   btn.disabled = true;
   btn.textContent = '添加中…';
   const before = new Set(state.map.keys());
+  // 种子名先留一份：添加成功后列表里才有真名，这里先用它给类型兜底
+  const hintName = addMode === 'link' ? (urls.split('\n')[0] || '').trim() : (addFiles[0]?.name || '');
   try {
     const res = await api('/torrents/add', { method: 'POST', body: fd });
     if (/fail/i.test(res)) throw new Error('qBittorrent 拒绝了该种子');
@@ -1690,18 +2640,27 @@ $('#addSubmit').addEventListener('click', async () => {
     $('#dropText').textContent = '点击选择或拖入 .torrent 文件';
     toast('已添加到下载队列', 'ok');
     refreshNow();
-    // 带着封面添加时，等种子出现在列表里再把图挂上去
+    // 新种子一出现就把类型写进缓存（后台跑，不挡界面）；带封面时顺便等它拿到新 hash
+    const pending = (state.coverOn || addCoverFile)
+      ? waitNewHashes(before).then(async (fresh) => {
+        const out = await seedKinds(fresh, { name: hintName, category: cat });
+        autoScrapeNew(fresh); // 设置里开了「自动刮削」就顺手去 TheTVDB 找海报
+        return out;
+      })
+      : null;
     if (addCoverFile) {
-      const fresh = await waitNewHashes(before);
+      const fresh = pending ? await pending : await waitNewHashes(before);
       if (!fresh.length) {
         toast('没找到刚添加的种子，封面未设置', 'err');
       } else {
         const file = addCoverFile;
-        const done = await Promise.all(fresh.map((h) => uploadCoverFile(h, file)));
+        const done = await Promise.all(fresh.map((h) => uploadCoverFile(h, file, true)));
         if (done.some(Boolean)) toast('封面已设置', 'ok');
         renderRows();
       }
       resetAddCover();
+    } else if (pending) {
+      pending.catch(() => {});
     }
   } catch (err) {
     toast(err.message || '添加失败', 'err');
@@ -1733,7 +2692,305 @@ async function openSettings() {
   $('#setTheme').value = localStorage.getItem(LS.theme) || 'system';
   $('#setInterval').value = String(state.pollMs);
   $('#setThumbs').checked = state.coverOn;
+  const lt = $('#setListTitle');
+  if (lt) lt.value = state.listTitleMode;
+  refreshCacheInfo();
+  refreshTvdbInfo();
+  // 真机视口/安全区读数：iOS 适配排障用，平时就是一行小字
+  const vp = $('#setViewportInfo');
+  if (vp) {
+    window.__syncSafeArea?.();
+    const d = window.__iosDebug;
+    const cssV = (document.querySelector('link[rel="stylesheet"]')?.href.match(/[?&]v=([^&]+)/) || [])[1] || 'base';
+    vp.textContent = d
+      ? `样式 ${cssV} · ${d.standalone ? 'PWA' : '浏览器'} · 视口 ${d.inner} · 屏幕 ${d.screen} · 安全区 上${d.safeTop}/下${d.safeBottom}`
+        + (d.deficit > 0 ? ` · 缺口${d.deficit}px已补偿` : ' · 无缺口')
+      : '';
+  }
 }
+
+/** 缓存概况：扫描了多少个种子、缩略图占了多少空间 */
+async function refreshCacheInfo() {
+  const el = $('#setCacheInfo');
+  if (!el) return;
+  el.textContent = '读取中…';
+  try {
+    const s = await fetch('/__cover/cache').then((r) => r.json());
+    el.textContent = `目录扫描结果 ${s.scan} 个种子 · TVDB 海报 ${s.tvdb?.count || 0} 张 / ${fmtBytes(s.tvdb?.bytes || 0)}`
+      + ` · 目录图片 ${s.dirImages ?? s.images} 张 / ${fmtBytes(s.dirBytes ?? s.bytes)}`;
+  } catch { el.textContent = '读取失败'; }
+}
+
+/** 拉一次全量媒体名（TVDB 刮削结果，供列表标题显示），体积极小随便刷 */
+async function refreshMediaTitles() {
+  try {
+    const data = await fetch('/__cover/titles').then((r) => r.json());
+    state.mediaTitles = new Map(Object.entries(data || {}));
+    renderRows(); // mKey 变化的行会自动重算标题
+  } catch { /* 拉不到就先用原始名 */ }
+}
+
+/* ══════════ 设置：TheTVDB 刮削 ══════════ */
+
+/** 拉一次服务端状态：密钥在服务端，页面只拿到「配好没有」 */
+async function refreshTvdbInfo() {
+  const info = $('#setTvdbInfo');
+  if (!info) return;
+  info.textContent = '读取中…';
+  try {
+    const st = await fetch('/__cover/tvdb/status').then((r) => r.json());
+    Object.assign(state.tvdb, {
+      enabled: Boolean(st.enabled), configured: Boolean(st.configured), auto: st.auto || 'off', lang: st.lang || 'eng',
+    });
+    $('#setTvdbEnabled').checked = Boolean(st.enabled);
+    $('#setTvdbLang').value = st.lang || 'zho';
+    $('#setTvdbAuto').value = st.auto || 'off';
+    if (!$('#setTvdbKey').value) $('#setTvdbKey').value = '';
+    $('#setTvdbKey').placeholder = st.keyHint ? `已保存：${st.keyHint}` : 'thetvdb.com → Dashboard → API Keys';
+    $('#setTvdbKeyHint').textContent = st.hasEnvKey ? '来自环境变量' : st.configured ? '已配置' : '未配置';
+    const u = st.usage || {};
+    const usageTxt = u.blockedUntil
+      ? ` · 已限流，${new Date(u.blockedUntil).toLocaleTimeString('zh-CN', { hour: '2-digit', minute: '2-digit' })} 后恢复`
+      : ` · 今日已调用 ${u.calls || 0} 次`;
+    info.textContent = st.configured
+      ? `已配置 · 海报语言 ${st.lang || '不限'} · 自动刮削${st.auto === 'new' ? '：新加入的影视种子' : '：仅手动'}${usageTxt}`
+      : '还没填 API Key：去 thetvdb.com 登录 → Dashboard → API Keys 申请一个（免费的）';
+  } catch { info.textContent = '读取失败'; }
+}
+
+$('#setTvdbSave').addEventListener('click', async () => {
+  const btn = $('#setTvdbSave');
+  btn.disabled = true;
+  btn.textContent = '测试中…';
+  try {
+    const res = await fetch('/__cover/tvdb/config', {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({
+        apiKey: $('#setTvdbKey').value.trim() || undefined,
+        pin: $('#setTvdbPin').value.trim(),
+        lang: $('#setTvdbLang').value,
+        auto: $('#setTvdbAuto').value,
+        enabled: $('#setTvdbEnabled').checked,
+      }),
+    });
+    const data = await res.json().catch(() => ({}));
+    if (!res.ok) throw new Error(data.message || '保存失败');
+    const t = await fetch('/__cover/tvdb/test', { method: 'POST' }).then((r) => r.json());
+    if (t.ok) toast(`TheTVDB 连接正常（${t.ms}ms）`, 'ok');
+    else toast(t.message || '连接失败，检查 API Key', 'err');
+    $('#setTvdbKey').value = '';
+    $('#setTvdbPin').value = '';
+    refreshTvdbInfo();
+  } catch (err) {
+    toast(err.message, 'err');
+  } finally {
+    btn.disabled = false;
+    btn.textContent = '保存并测试';
+  }
+});
+
+/** 批量刮削：用 SSE 进度流，界面实时显示「第几个 / 正在刮谁 / 成功多少」 */
+let tvdbScanEs = null;
+
+function scrapeStopped(finished = false) {
+  if (tvdbScanEs) { tvdbScanEs.close(); tvdbScanEs = null; }
+  const btn = $('#setTvdbScan');
+  btn.disabled = false;
+  btn.innerHTML = '<svg><use href="#i-refresh"/></svg>刮削全部影视种子';
+  if (!finished) $('#tvdbScanBox').hidden = true;
+}
+
+function scrapeUpdate(s) {
+  const box = $('#tvdbScanBox');
+  box.hidden = false;
+  const pct = s.total ? Math.min(100, Math.round((s.i / s.total) * 100)) : 0;
+  $('#tvdbScanBar').style.width = `${pct}%`;
+  $('#tvdbScanCount').textContent = `${s.i} / ${s.total}`;
+  $('#tvdbScanNow').textContent = s.name ? `正在刮：${s.name}` : '准备中…';
+  const bits = [];
+  if (s.done) bits.push(`成功 ${s.done}`);
+  if (s.skipped) bits.push(`跳过 ${s.skipped}`);
+  if (s.failed) bits.push(`没匹配 ${s.failed}`);
+  $('#tvdbScanStat').textContent = bits.join(' · ') || '—';
+}
+
+function startTvdbScan() {
+  if (tvdbScanEs) return;
+  const btn = $('#setTvdbScan');
+  btn.disabled = true;
+  btn.innerHTML = '<svg><use href="#i-refresh"/></svg>刮削中…';
+  const agg = { done: 0, skipped: 0, failed: 0, i: 0, total: 0 };
+  const es = new EventSource('/__cover/tvdb/scan/stream');
+  tvdbScanEs = es;
+  es.addEventListener('start', (e) => {
+    const d = JSON.parse(e.data || '{}');
+    agg.total = d.total || 0;
+    scrapeUpdate(agg);
+    if (!agg.total) { toast('没有可刮削的种子', 'err'); scrapeStopped(); }
+  });
+  es.addEventListener('item', (e) => {
+    const d = JSON.parse(e.data || '{}');
+    agg.i = d.i || agg.i + 1;
+    agg.total = d.total || agg.total;
+    if (d.status === 'ok') agg.done++;
+    else if (d.status === 'skip') agg.skipped++;
+    else agg.failed++;
+    if (d.status === 'ok') { state.coverMode.set(d.hash, 'tvdb'); state.coverV.set(d.hash, Date.now()); }
+    scrapeUpdate({ ...agg, name: d.name });
+  });
+  es.addEventListener('done', (e) => {
+    const d = JSON.parse(e.data || '{}');
+    es.close();
+    tvdbScanEs = null;
+    refreshAllCovers();
+    refreshMediaTitles();
+    refreshCacheInfo();
+    $('#tvdbScanNow').textContent = d.cancelled ? '已停止' : '刮削完成';
+    $('#tvdbScanBar').style.width = '100%';
+    toast(d.cancelled
+      ? `已停止：完成 ${d.done} 个，跳过 ${d.skipped} 个，没匹配 ${d.failed} 个`
+      : `刮削完成：成功 ${d.done} 个，跳过 ${d.skipped} 个，没匹配上 ${d.failed} 个`, d.cancelled ? '' : 'ok');
+    btn.disabled = false;
+    btn.innerHTML = '<svg><use href="#i-refresh"/></svg>刮削全部影视种子';
+    setTimeout(() => { $('#tvdbScanBox').hidden = true; }, 2500);
+  });
+  es.addEventListener('busy', () => {
+    es.close();
+    tvdbScanEs = null;
+    toast('已经有一个刮削任务在跑了', 'err');
+    btn.disabled = false;
+    btn.innerHTML = '<svg><use href="#i-refresh"/></svg>刮削全部影视种子';
+  });
+  es.addEventListener('error', (e) => {
+    // 服务端推的 error 事件带 message；连接断开时 e.data 为空，交给 onerror 处理
+    const msg = e.data ? (JSON.parse(e.data || '{}').message || '刮削失败') : null;
+    if (msg) { toast(msg, 'err'); scrapeStopped(); }
+  });
+  es.onerror = () => { if (tvdbScanEs) { toast('刮削中断（连接已断开）', 'err'); scrapeStopped(); } };
+}
+
+$('#setTvdbScan').addEventListener('click', async () => {
+  if (tvdbScanEs) return;
+  const ok = await confirmDialog({
+    title: '刮削全部影视种子？',
+    desc: '会给列表里每个影视类种子去 TheTVDB 查一次并下载海报，种子多的时候会花点时间，也消耗 API 额度。已经刮过的会跳过，过程中可以随时点「停止」。',
+    okText: '开始刮削',
+  });
+  if (!ok) return;
+  startTvdbScan();
+});
+
+$('#tvdbScanCancel').addEventListener('click', () => {
+  if (!tvdbScanEs) return;
+  tvdbScanEs.close();
+  tvdbScanEs = null;
+  toast('已停止刮削');
+  refreshAllCovers();
+  refreshMediaTitles();
+  refreshCacheInfo();
+  scrapeStopped();
+});
+
+/** 新种子加进来后按设置自动刮一次（后台跑，失败也不打扰） */
+async function autoScrapeNew(hashes) {
+  if (!hashes?.length || state.tvdb.auto !== 'new' || !state.tvdb.enabled) return;
+  try {
+    const res = await fetch('/__cover/tvdb/auto', {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ hashes }),
+    });
+    const data = await res.json().catch(() => ({}));
+    const results = data.results || {};
+    const hits = Object.entries(results).filter(([, r]) => r.ok);
+    if (!hits.length) return;
+    const now = Date.now();
+    for (const [h] of hits) {
+      state.coverMode.set(h, 'tvdb');
+      state.coverV.set(h, now);
+      const el = rowCache.get(h);
+      if (el) el._v.coverKey = null;
+    }
+    renderRows();
+    refreshMediaTitles();
+  } catch { /* 联网刮削失败不影响下载 */ }
+}
+
+/** 清空后让所有行重新取一次图（服务端缓存没了，版本号也要跟着换） */
+function refreshAllCovers() {
+  const now = Date.now();
+  for (const t of state.list) state.coverV.set(t.hash, now);
+  state.kindAsked.clear();
+  for (const el of rowCache.values()) el._v.coverKey = null;
+  renderRows();
+  if (state.detailHash) refreshDetailShell();
+}
+
+$('#setCacheScan').addEventListener('click', async () => {
+  const btn = $('#setCacheScan');
+  btn.disabled = true;
+  try {
+    const res = await fetch('/__cover/clear', {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ scope: 'scan' }),
+    });
+    const data = await res.json();
+    if (!res.ok) throw new Error(data.message || '清空失败');
+    refreshAllCovers();
+    toast('扫描缓存已清空，下次会重新扫描目录', 'ok');
+    refreshCacheInfo();
+  } catch (err) { toast(err.message, 'err'); } finally { btn.disabled = false; }
+});
+
+$('#setCacheTvdb').addEventListener('click', async () => {
+  const ok = await confirmDialog({
+    title: '清空 TheTVDB 缓存？',
+    desc: '会删除已下载的 TVDB 海报和搜索 / 作品图缓存。之后打开封面或重新刮削时会再次联网查询，消耗 API 额度。不影响目录缩略图和你上传的封面。',
+    okText: '清空',
+  });
+  if (!ok) return;
+  const btn = $('#setCacheTvdb');
+  btn.disabled = true;
+  try {
+    const res = await fetch('/__cover/clear', {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ scope: 'tvdb' }),
+    });
+    const data = await res.json();
+    if (!res.ok) throw new Error(data.message || '清空失败');
+    for (const [h, m] of state.coverMode) if (m === 'tvdb') state.coverMode.delete(h);
+    state.mediaTitles.clear();
+    refreshAllCovers();
+    toast('TheTVDB 缓存已清空，下次会重新联网刮削', 'ok');
+    refreshCacheInfo();
+  } catch (err) { toast(err.message, 'err'); } finally { btn.disabled = false; }
+});
+
+$('#setCacheImages').addEventListener('click', async () => {
+  const ok = await confirmDialog({
+    title: '清空目录图片缓存？',
+    desc: '会删除自动生成的目录缩略图，之后按目录内容重新生成。不影响 TVDB 海报和你上传 / 挑选过的封面。',
+    okText: '清空',
+  });
+  if (!ok) return;
+  const btn = $('#setCacheImages');
+  btn.disabled = true;
+  try {
+    const res = await fetch('/__cover/clear', {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ scope: 'images' }),
+    });
+    const data = await res.json();
+    if (!res.ok) throw new Error(data.message || '清空失败');
+    refreshAllCovers();
+    toast('目录图片缓存已清空，之后会按目录内容重新生成', 'ok');
+    refreshCacheInfo();
+  } catch (err) { toast(err.message, 'err'); } finally { btn.disabled = false; }
+});
 
 $('#setTargetSave').addEventListener('click', async () => {
   const url = $('#setTarget').value.trim();
@@ -1780,6 +3037,12 @@ $('#setInterval').addEventListener('change', (e) => {
 $('#setThumbs').addEventListener('change', (e) => {
   setCoverOn(e.target.checked);
   toast(e.target.checked ? '列表已显示缩略图' : '列表已隐藏缩略图');
+});
+
+$('#setListTitle').addEventListener('change', (e) => {
+  state.listTitleMode = e.target.value;
+  localStorage.setItem(LS.listTitle, state.listTitleMode);
+  renderRows(); // 标题缓存键里有 mode，直接重算
 });
 
 $('#setLogout').addEventListener('click', async () => {
@@ -1874,8 +3137,8 @@ function applyTheme(mode) {
     localStorage.setItem(LS.theme, mode);
   }
   document.documentElement.dataset.theme = mode;
-  const meta = document.querySelector('meta[name="theme-color"]');
-  if (meta) meta.setAttribute('content', mode === 'light' ? '#f4f5f9' : '#0b0d12');
+  /* 状态栏底色 = 页面实色（--bg），与 index.html 里的 __syncThemeColor 同一实现 */
+  if (window.__syncThemeColor) window.__syncThemeColor();
 }
 
 $('#themeBtn').addEventListener('click', () => {
@@ -1906,6 +3169,7 @@ function onUnauthorized() {
   const creds = readCreds();
   if (creds && !loginRetried) {
     loginRetried = true;
+    $('#loginRemember').checked = true;
     doLogin(creds.username, creds.password, true);
     return;
   }
@@ -1933,6 +3197,20 @@ async function doLogin(username, password, silent) {
       $('#loginErr').hidden = true;
       if ($('#loginRemember').checked) {
         localStorage.setItem(LS.creds, JSON.stringify({ username, password }));
+        // 双保险：服务端也存一份（iOS PWA 的 WebKit 会 7 天清一次 localStorage，
+        // 但清不掉服务端 config.json —— 会话由服务端自动续）
+        fetch('/__auth', {
+          method: 'POST',
+          headers: { 'content-type': 'application/json' },
+          body: JSON.stringify({ username, password }),
+        }).catch(() => {});
+      } else {
+        localStorage.removeItem(LS.creds);
+        fetch('/__auth', {
+          method: 'POST',
+          headers: { 'content-type': 'application/json' },
+          body: JSON.stringify({ clear: true }),
+        }).catch(() => {});
       }
       if (!silent) toast('登录成功', 'ok');
       state.rid = 0;
@@ -1983,6 +3261,8 @@ async function bootAuth() {
 document.addEventListener('keydown', (e) => {
   const typing = /input|textarea|select/i.test(document.activeElement?.tagName || '');
   if (e.key === 'Escape') {
+    // 预览层在最上面：Escape 只关预览，不要把背后的详情抽屉一起关了
+    if (viewerEl) { closeViewer(); return; }
     if (document.body.dataset.modal) {
       if (document.body.dataset.modal !== 'loginModal') closeModal(document.body.dataset.modal);
       return;
@@ -1992,7 +3272,7 @@ document.addEventListener('keydown', (e) => {
     if (isMobile()) closeSidebar();
     return;
   }
-  if (typing) return;
+  if (viewerEl || typing) return;
 
   if (e.key === '/' || (e.key === 'f' && (e.metaKey || e.ctrlKey))) {
     e.preventDefault();
@@ -2014,7 +3294,16 @@ document.addEventListener('keydown', (e) => {
 /* ══════════ 启动 ══════════ */
 async function boot() {
   applyTheme(localStorage.getItem(LS.theme) || 'system');
+  loadKinds(); // 上次记住的类型，让第一帧就不空着
   setCoverOn(state.coverOn, false);
+  registerServiceWorker();
+  // 服务端才知道有没有配 TheTVDB，先问一次，添加种子时要按它决定要不要自动刮削
+  fetch('/__cover/tvdb/status').then((r) => r.json()).then((st) => {
+    Object.assign(state.tvdb, {
+      enabled: Boolean(st.enabled), configured: Boolean(st.configured), auto: st.auto || 'off', lang: st.lang || 'eng',
+    });
+  }).catch(() => {});
+  refreshMediaTitles(); // 列表标题要用刮削名，先拉一次全量
   updateSortUI();
   setFilter('all');
   try {
@@ -2033,6 +3322,52 @@ async function boot() {
 document.addEventListener('visibilitychange', () => {
   if (!document.hidden) refreshNow();
 });
+
+/* ══════════ Service Worker（iOS PWA 秒开 / 离线壳 / 版本更新） ══════════ */
+
+/** 手动检查界面更新：iOS PWA 的 SW 更新很懒，给个按钮兜底 */
+$('#setCheckUpdate')?.addEventListener('click', async () => {
+  const btn = $('#setCheckUpdate');
+  btn.disabled = true;
+  try {
+    if (!('serviceWorker' in navigator) || !navigator.serviceWorker.controller) {
+      // 没有 SW（或首次），直接重载页面就能拿到最新
+      location.reload();
+      return;
+    }
+    const reg = await navigator.serviceWorker.getRegistration();
+    const next = await reg?.update();
+    const waiting = next?.waiting || next?.installing;
+    if (waiting) {
+      toast('新版本已就绪，即将刷新', 'ok');
+      waiting.postMessage('SKIP_WAITING');
+      setTimeout(() => location.reload(), 1200);
+    } else {
+      toast('已是最新版本', 'ok');
+    }
+  } catch (err) {
+    toast(`检查失败：${err.message}`, 'err');
+  } finally {
+    btn.disabled = false;
+  }
+});
+
+function registerServiceWorker() {
+  if (!('serviceWorker' in navigator) || location.protocol !== 'http:' && location.protocol !== 'https:') return;
+  // 有新版本接管页面时刷新一次（首次安装的 controllerchange 不算）
+  let hadController = Boolean(navigator.serviceWorker.controller);
+  navigator.serviceWorker.addEventListener('controllerchange', () => {
+    if (hadController) location.reload();
+  });
+  navigator.serviceWorker.register('/sw.js').then((reg) => {
+    // 打开应用时检查一次更新；iOS PWA 的 SW 更新很懒，回前台也补一次
+    reg.update().catch(() => {});
+    setInterval(() => reg.update().catch(() => {}), 60 * 60 * 1000);
+    document.addEventListener('visibilitychange', () => {
+      if (!document.hidden) reg.update().catch(() => {});
+    });
+  }).catch(() => {});
+}
 
 boot();
 

@@ -2,25 +2,95 @@
 <html lang="zh-CN" data-theme="dark">
 <head>
 <meta charset="UTF-8" />
-<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover, maximum-scale=1" />
-<meta name="theme-color" content="#0b0d12" />
+<!-- viewport-fit=cover 让 env(safe-area-inset-*) 有值；其余对齐 stt-web 的写法 -->
+<meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, minimum-scale=1.0, viewport-fit=cover, shrink-to-fit=yes" />
+<!-- 状态栏底色 = 页面实色：system 两档先给一份静态值（首帧前就生效），运行时由
+     __syncThemeColor 统一改成当前 --bg。两处都不能跟 --bg 有偏差，否则状态栏下缘
+     会留一条色差带，或让 iOS 退回半透明材质把顶部糊成雾。 -->
+<meta name="theme-color" content="#f2f4f9" media="(prefers-color-scheme: light)" />
+<meta name="theme-color" content="#0a0c11" media="(prefers-color-scheme: dark)" />
 <title>qBWebUI · 下载控制台</title>
 <link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'><rect width='32' height='32' rx='9' fill='%236c8cff'/><path d='M16 8v12m0 0l-4.5-4.5M16 20l4.5-4.5M9 24h14' stroke='white' stroke-width='2.4' stroke-linecap='round' stroke-linejoin='round' fill='none'/></svg>" />
-<link rel="stylesheet" href="styles.css" />
+<!-- ?v= 是资源版本号：改 styles.css / app.js 必须同步改这里，iOS PWA 的 Service Worker
+     更新不可靠，靠 URL 变化强制绕过旧缓存。sw.js 的 SHELL 列表也要同步。 -->
+<link rel="stylesheet" href="styles.css?v=20261024y" />
 <link rel="manifest" href="manifest.webmanifest" />
 <link rel="apple-touch-icon" href="icon-180.png" />
-<meta name="apple-mobile-web-app-capable" content="yes" />
 <meta name="apple-mobile-web-app-title" content="qBWebUI" />
-<meta name="apple-mobile-web-app-status-bar-style" content="black-translucent" />
+<!-- 用 default（不是 black-translucent）。两种几何的真机读数：
+       · default            → 视口 873、env(top) 0、网页从状态栏**下方**开始、底部贴屏幕底
+       · black-translucent  → 视口 873、env(top) 59、网页从 y=0 开始，但**屏幕最下 59pt 永远空着**
+     后者试过：iOS 把 fixed 元素裁在 873 的布局视口里，bottom:-59 也画不进那条空白
+     （--icb-deficit 在真机上补不动，实测底栏仍停在 871pt、下面露出页面底色）。
+     所以底部必须是 default；顶部那条状态栏是 iOS 画的，网页碰不到。 -->
+<meta name="apple-mobile-web-app-capable" content="yes" />
+<meta name="apple-mobile-web-app-status-bar-style" content="default" />
+<meta name="mobile-web-app-capable" content="yes" />
 <script>
+  /* 状态栏 / 顶栏的底色必须和页面实色（--bg）完全一致，否则 iOS 会在状态栏下缘
+     留一条色差带、严重时退回系统半透明材质（顶部发雾）。统一从 CSS 变量取，
+     避免十六进制在两处写歪。applyTheme 里也调它。 */
+  window.__syncThemeColor = function () {
+    var bg = getComputedStyle(document.documentElement).getPropertyValue('--bg').trim();
+    if (!bg) return;
+    /* 上面有 light/dark 两条 media 版本，一起改，免得运行时出现两套色值 */
+    document.querySelectorAll('meta[name="theme-color"]').forEach(function (m) {
+      m.setAttribute('content', bg);
+    });
+  };
   (function () {
     try {
       var saved = localStorage.getItem('qb.theme');
       var theme = saved || (window.matchMedia('(prefers-color-scheme: light)').matches ? 'light' : 'dark');
       document.documentElement.dataset.theme = theme;
-      var meta = document.querySelector('meta[name="theme-color"]');
-      if (meta) meta.setAttribute('content', theme === 'light' ? '#f4f5f9' : '#0b0d12');
+      window.__syncThemeColor();
     } catch (e) {}
+  })();
+  /* iOS 独立 PWA 视口缺口校准：
+   * 真机实测（black-translucent + viewport-fit=cover）：布局视口 873，屏幕 932，
+   * 内容从屏幕最顶（状态栏底下）开始渲染，底部却悬空 59pt 露出页面背景——
+   * 即「视口高 = 屏幕高 − 状态栏高，顶部锚定」。这是布局视口本身的缺口，
+   * 加 padding 治不了，只能把贴底（bottom:0）和满高（100dvh）的元素
+   * 用 --icb-deficit 补上这一段；env(safe-area-inset-*) 保持原样不动。 */
+  (function () {
+    function probe() {
+      var el = document.createElement('div');
+      el.style.cssText = 'position:fixed;visibility:hidden;pointer-events:none;'
+        + 'padding-top:env(safe-area-inset-top);padding-bottom:env(safe-area-inset-bottom);';
+      document.documentElement.appendChild(el);
+      var cs = getComputedStyle(el);
+      var top = parseFloat(cs.paddingTop) || 0;
+      var bottom = parseFloat(cs.paddingBottom) || 0;
+      el.remove();
+      return { top: top, bottom: bottom };
+    }
+    window.__syncSafeArea = function () {
+      var iw = window.innerWidth, ih = window.innerHeight;
+      var sw = window.screen.width || 0, sh = window.screen.height || 0;
+      var sa = probe();
+      var standalone = window.navigator.standalone === true
+        || window.matchMedia('(display-mode: standalone)').matches;
+      // 只在独立 PWA 里补偿：Safari 浏览器视口本来就被工具栏顶小，不能这么算。
+      // 且只有「内容延伸到状态栏底下」（env top > 0，即被设成 black-translucent
+      // 或 iOS 自己这么渲染）时才存在缺口；默认几何下 env top = 0、底部本就贴屏幕底。
+      var portrait = ih >= iw;
+      var gap = Math.max(0, (portrait ? sh : sw) - (portrait ? ih : iw));
+      var deficit = (standalone && sa.top > 0) ? gap : 0;
+      if (deficit > 120) deficit = 0; // 异常值保护（如转屏瞬间读数错乱）
+      document.documentElement.style.setProperty('--icb-deficit', deficit + 'px');
+      window.__iosDebug = {
+        standalone: standalone,
+        inner: iw + 'x' + ih,
+        screen: sw + 'x' + sh,
+        vv: window.visualViewport ? Math.round(window.visualViewport.height) : 0,
+        safeTop: sa.top, safeBottom: sa.bottom,
+        deficit: deficit,
+        dpr: window.devicePixelRatio,
+      };
+    };
+    window.addEventListener('resize', window.__syncSafeArea);
+    window.addEventListener('orientationchange', window.__syncSafeArea);
+    window.__syncSafeArea();
   })();
 </script>
 </head>
@@ -34,6 +104,8 @@
   <symbol id="i-trash" viewBox="0 0 24 24"><path d="M4 7h16M9 7V4.5h6V7M6.5 7l1 13h9l1-13M10 11v5.5M14 11v5.5"/></symbol>
   <symbol id="i-plus" viewBox="0 0 24 24"><path d="M12 5v14M5 12h14"/></symbol>
   <symbol id="i-search" viewBox="0 0 24 24"><circle cx="11" cy="11" r="6.5"/><path d="m16 16 4 4"/></symbol>
+  <symbol id="i-zoom-in" viewBox="0 0 24 24"><circle cx="10.5" cy="10.5" r="6.5"/><path d="M10.5 7.5v6M7.5 10.5h6M15.5 15.5 21 21"/></symbol>
+  <symbol id="i-zoom-out" viewBox="0 0 24 24"><circle cx="10.5" cy="10.5" r="6.5"/><path d="M7.5 10.5h6M15.5 15.5 21 21"/></symbol>
   <symbol id="i-settings" viewBox="0 0 24 24"><circle cx="12" cy="12" r="3"/><path d="M19.4 15a1.7 1.7 0 0 0 .3 1.9l.1.1a2 2 0 1 1-2.8 2.8l-.1-.1a1.7 1.7 0 0 0-2.9 1.2 2 2 0 1 1-4 0 1.7 1.7 0 0 0-2.9-1.2l-.1.1a2 2 0 1 1-2.8-2.8l.1-.1A1.7 1.7 0 0 0 3 15a2 2 0 1 1 0-4 1.7 1.7 0 0 0 1.5-2.9l-.1-.1a2 2 0 1 1 2.8-2.8l.1.1A1.7 1.7 0 0 0 10 4a2 2 0 1 1 4 0 1.7 1.7 0 0 0 2.9 1.5l.1-.1a2 2 0 1 1 2.8 2.8l-.1.1A1.7 1.7 0 0 0 21 11a2 2 0 1 1 0 4 1.7 1.7 0 0 0-1.6 1z"/></symbol>
   <symbol id="i-sun" viewBox="0 0 24 24"><circle cx="12" cy="12" r="4"/><path d="M12 2v2M12 20v2M4.9 4.9l1.4 1.4M17.7 17.7l1.4 1.4M2 12h2M20 12h2M4.9 19.1l1.4-1.4M17.7 6.3l1.4-1.4"/></symbol>
   <symbol id="i-moon" viewBox="0 0 24 24"><path d="M20 14.5A8.5 8.5 0 0 1 9.5 4a8.5 8.5 0 1 0 10.5 10.5z"/></symbol>
@@ -61,10 +133,11 @@
   <symbol id="i-lock" viewBox="0 0 24 24"><rect x="4.5" y="10" width="15" height="10" rx="2.5"/><path d="M8 10V7.5a4 4 0 0 1 8 0V10"/></symbol>
   <symbol id="i-eye" viewBox="0 0 24 24"><path d="M2.5 12S6 5.5 12 5.5 21.5 12 21.5 12 18 18.5 12 18.5 2.5 12 2.5 12z"/><circle cx="12" cy="12" r="3"/></symbol>
   <symbol id="i-inbox" viewBox="0 0 24 24"><path d="M3.5 13.5 6.5 5h11l3 8.5V18a2.5 2.5 0 0 1-2.5 2.5h-12A2.5 2.5 0 0 1 3.5 18z"/><path d="M3.5 13.5h4l1 2.2h7l1-2.2h4"/></symbol>
-  <symbol id="i-film" viewBox="0 0 24 24"><rect x="3.2" y="4.5" width="17.6" height="15" rx="2.6"/><path d="M3.2 9h17.6M3.2 15h17.6M7.6 4.5v15M16.4 4.5v15"/></symbol>
-  <symbol id="i-music" viewBox="0 0 24 24"><path d="M9 18V6.2l9-1.7V16"/><circle cx="6.5" cy="18" r="2.6"/><circle cx="15.5" cy="16" r="2.6"/></symbol>
+  <symbol id="i-film" viewBox="0 0 24 24"><rect x="3.2" y="4.8" width="17.6" height="14.4" rx="3"/><path d="M10.6 9.1 15.9 12l-5.3 2.9z" fill="currentColor" stroke="none"/></symbol>
+  <symbol id="i-music" viewBox="0 0 24 24"><path d="M4.4 17.6v-4.9a7.6 7.6 0 0 1 15.2 0v4.9"/><rect x="3.2" y="13.9" width="4.4" height="6.6" rx="2.1"/><rect x="16.4" y="13.9" width="4.4" height="6.6" rx="2.1"/></symbol>
   <symbol id="i-image" viewBox="0 0 24 24"><rect x="3.2" y="4.8" width="17.6" height="14.4" rx="2.6"/><circle cx="8.6" cy="9.8" r="1.7"/><path d="m4.6 17.4 5-5 3.3 3.3 2.7-2.7 3.8 3.8"/></symbol>
   <symbol id="i-archive" viewBox="0 0 24 24"><path d="M3.5 7.5h17v11a2 2 0 0 1-2 2h-13a2 2 0 0 1-2-2z"/><path d="M3 4h18v3.5H3zM10.2 11.5h3.6"/></symbol>
+  <symbol id="i-book" viewBox="0 0 24 24"><path d="M4 5.5A2.5 2.5 0 0 1 6.5 3H19v15.5H6.5A2.5 2.5 0 0 0 4 21V5.5z"/><path d="M8 7.5h7M8 11h5"/></symbol>
   <symbol id="i-photo" viewBox="0 0 24 24"><rect x="3" y="4.5" width="18" height="15" rx="3"/><path d="m4.5 16.5 4.8-4.8 3.2 3.2 2.6-2.6 4.4 4.4"/><circle cx="8.4" cy="9.2" r="1.6"/></symbol>
 </svg>
 
@@ -325,6 +398,7 @@
         <div class="cover-top-info">
           <p class="cover-name" id="coverName">—</p>
           <p class="hint" id="coverMode">—</p>
+          <p class="hint" id="coverKind"></p>
           <div class="cover-acts">
             <button class="btn btn-soft btn-sm" id="coverUpload"><svg><use href="#i-upload"/></svg>上传</button>
             <button class="btn btn-soft btn-sm" id="coverIcon"><svg><use href="#i-image"/></svg>用图标</button>
@@ -338,6 +412,24 @@
         <small id="coverCount"></small>
       </div>
       <div class="cover-grid" id="coverGrid"></div>
+
+      <div class="cover-sec">
+        <span>TheTVDB 刮削<em id="coverTvdbName"></em></span>
+        <small id="coverTvdbHint">—</small>
+      </div>
+      <div class="tvdb-bar">
+        <input id="tvdbQuery" type="text" placeholder="片名 / 年份" autocomplete="off" spellcheck="false" />
+        <select id="tvdbType" aria-label="搜索类型">
+          <option value="">自动</option>
+          <option value="series">剧集</option>
+          <option value="movie">电影</option>
+        </select>
+        <button class="btn btn-soft btn-sm" id="tvdbSearch"><svg><use href="#i-search"/></svg>搜索</button>
+        <button class="btn btn-ghost btn-sm" id="tvdbBack" hidden><svg><use href="#i-chevron-down"/></svg>返回</button>
+        <button class="btn btn-ghost btn-sm" id="tvdbPick"><svg><use href="#i-refresh"/></svg>自动匹配</button>
+      </div>
+      <div class="cover-grid" id="tvdbGrid"></div>
+      <p class="hint tvdb-attr">Metadata provided by <a href="https://www.thetvdb.com" target="_blank" rel="noreferrer">TheTVDB</a> · 海报版权归各自权利人，仅限个人本地使用</p>
     </div>
   </div>
 </div>
@@ -382,6 +474,73 @@
         <div class="check-group">
           <label class="check-line"><input type="checkbox" id="setThumbs" /><span class="checkbox"></span>在列表中显示封面缩略图</label>
         </div>
+        <label class="field"><span>列表标题<em class="field-hint">媒体名来自 TheTVDB 刮削</em></span>
+          <select id="setListTitle">
+            <option value="off">只显示原始文件名</option>
+            <option value="media">媒体名为主 · 原始文件名为副</option>
+            <option value="original">原始文件名为主 · 媒体名为副</option>
+          </select>
+        </label>
+      </div>
+
+      <div class="card-block">
+        <div class="block-title"><svg><use href="#i-hdd"/></svg>封面缓存</div>
+        <p class="hint" id="setCacheInfo">—</p>
+        <div class="row-actions">
+          <button class="btn btn-ghost btn-sm" id="setCacheScan"><svg><use href="#i-refresh"/></svg>清空扫描缓存</button>
+          <button class="btn btn-ghost btn-sm" id="setCacheTvdb"><svg><use href="#i-trash"/></svg>清空 TVDB 缓存</button>
+          <button class="btn btn-ghost btn-sm danger" id="setCacheImages"><svg><use href="#i-trash"/></svg>清空目录图片缓存</button>
+        </div>
+        <p class="hint">目录只扫一次：结果按种子状态缓存 6 小时（下载中的 1 分钟）并落盘，重启后仍生效；图片缩略图缓存在 <code>data/covers/</code>。「清空 TVDB 缓存」删掉联网刮削的海报和搜索记录，之后重新刮削；「清空目录图片缓存」删掉自动生成的缩略图，之后按目录内容重新生成。两者都不会删除你上传 / 挑选过的封面。</p>
+      </div>
+
+      <div class="card-block">
+        <div class="block-title"><svg><use href="#i-search"/></svg>TheTVDB 刮削</div>
+        <div class="check-group">
+          <label class="check-line"><input type="checkbox" id="setTvdbEnabled" /><span class="checkbox"></span>启用在线海报刮削</label>
+        </div>
+        <label class="field"><span>API Key<em class="field-hint" id="setTvdbKeyHint">未配置</em></span>
+          <input id="setTvdbKey" type="password" placeholder="thetvdb.com → Dashboard → API Keys" autocomplete="off" spellcheck="false" />
+        </label>
+        <label class="field"><span>订阅者 PIN<em class="field-hint">多数 key 不需要</em></span>
+          <input id="setTvdbPin" type="password" autocomplete="off" spellcheck="false" />
+        </label>
+        <div class="grid-2">
+          <label class="field"><span>刮削语言<em class="field-hint">译名 / 简介</em></span>
+            <select id="setTvdbLang">
+              <option value="zho">中文（大陆简体）</option>
+              <option value="zhtw">中文（臺灣國語）</option>
+              <option value="yue">粵語</option>
+              <option value="eng">English</option>
+              <option value="jpn">日本語</option>
+              <option value="kor">한국어</option>
+              <option value="">不限（用 TVDB 原名）</option>
+            </select>
+          </label>
+          <label class="field"><span>自动刮削</span>
+            <select id="setTvdbAuto">
+              <option value="off">仅手动</option>
+              <option value="new">新加入的影视种子</option>
+            </select>
+          </label>
+        </div>
+        <div class="row-actions">
+          <button class="btn btn-soft btn-sm" id="setTvdbSave"><svg><use href="#i-check"/></svg>保存并测试</button>
+          <button class="btn btn-ghost btn-sm" id="setTvdbScan"><svg><use href="#i-refresh"/></svg>刮削全部影视种子</button>
+        </div>
+        <div class="scrape-box" id="tvdbScanBox" hidden>
+          <div class="scrape-top">
+            <span class="scrape-now" id="tvdbScanNow">准备中…</span>
+            <span class="scrape-count" id="tvdbScanCount">0 / 0</span>
+          </div>
+          <div class="scrape-bar"><i id="tvdbScanBar"></i></div>
+          <div class="scrape-bot">
+            <span class="scrape-stat" id="tvdbScanStat">—</span>
+            <button class="btn btn-ghost btn-sm" id="tvdbScanCancel">停止</button>
+          </div>
+        </div>
+        <p class="hint" id="setTvdbInfo">—</p>
+        <p class="hint">元数据来自 <a href="https://www.thetvdb.com" target="_blank" rel="noreferrer">TheTVDB</a>。密钥只存在本机 <code>data/tvdb.json</code>（不会进仓库），也可以改用环境变量 <code>TVDB_API_KEY</code> / <code>TVDB_PIN</code>。默认按中文刮削：片名和剧情简介取 TheTVDB 的中文译名，英文名会一并保留（搜索结果副标题里能看到，写进 NFO 的 <code>originaltitle</code>），没有中文译名的作品自动回落到原名。TheTVDB 的服务条款要求展示来源，本项目已在封面弹窗给出链接。刮削成功后会把海报和 NFO 按媒体库约定写进种子自己的目录（电影 <code>视频名-poster.jpg</code> + <code>视频名.nfo</code>，剧集 <code>poster.jpg</code> + <code>tvshow.nfo</code>），Plex / Jellyfin / Kodi 可直接识别；放弃刮削或清空 TVDB 缓存时会一并删掉。</p>
       </div>
 
       <div class="card-block">
@@ -392,9 +551,11 @@
           <div><small>全局分享率</small><b id="setGlobalRatio">—</b></div>
         </div>
         <div class="row-actions">
+          <button class="btn btn-ghost" id="setCheckUpdate"><svg><use href="#i-activity"/></svg>检查界面更新</button>
           <button class="btn btn-ghost" id="setLogout"><svg><use href="#i-lock"/></svg>退出登录</button>
           <span class="hint">qBWebUI v1.0</span>
         </div>
+        <p class="hint" id="setViewportInfo" style="font-size:10px;opacity:.65;word-break:break-all"></p>
       </div>
     </div>
   </div>
@@ -444,6 +605,6 @@
 
 <div class="toasts" id="toasts"></div>
 
-<script type="module" src="app.js"></script>
+<script type="module" src="app.js?v=20261024y"></script>
 </body>
 </html>

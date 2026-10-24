@@ -10,7 +10,9 @@
 
 import http from 'node:http';
 import path from 'node:path';
-import { mkdirSync, writeFileSync, rmSync } from 'node:fs';
+import { randomBytes } from 'node:crypto';
+import { mkdirSync, writeFileSync, rmSync, copyFileSync } from 'node:fs';
+import { fileURLToPath } from 'node:url';
 
 const PORT = Number(process.argv[2] || 9899);
 
@@ -104,17 +106,40 @@ const torrents = [
     downloaded: 0.56 * GiB, uploaded: 0.01 * GiB, save_path: '/downloads',
   },
   {
+    hash: '7d'.repeat(20), name: 'Kind of Blue · Miles Davis [FLAC 24-192]', category: '音乐', tags: 'flac, jazz',
+    size: 1.8 * GiB, progress: 1, dlspeed: 0, upspeed: 0.18 * MB,
+    num_seeds: 5, num_complete: 74, num_leechs: 2, num_incomplete: 6,
+    state: 'uploading', eta: 8640000, added_on: now - 86400 * 4, completion_on: now - 86400 * 4 + 1800,
+    time_active: 86400 * 4, seeding_time: 86400 * 4, downloaded: 1.8 * GiB, uploaded: 0.9 * GiB,
+    save_path: '/downloads/media',
+  },
+  {
+    hash: '8e'.repeat(20), name: 'Clean Code 中文版 (Robert C. Martin).pdf', category: '书籍', tags: 'pdf, 编程',
+    size: 0.02 * GiB, progress: 1, dlspeed: 0, upspeed: 0,
+    num_seeds: 3, num_complete: 41, num_leechs: 0, num_incomplete: 2,
+    state: 'stoppedUP', eta: 8640000, added_on: now - 86400 * 40, completion_on: now - 86400 * 40 + 300,
+    time_active: 300, seeding_time: 0, downloaded: 0.02 * GiB, uploaded: 0.06 * GiB,
+    save_path: '/downloads/books',
+  },
+  {
     hash: '6c'.repeat(20), name: 'LibreOffice_24.8.2_macOS_aarch64.dmg', category: '软件', tags: '',
     size: 0.33 * GiB, progress: 0.35, dlspeed: 0, upspeed: 0,
     num_seeds: 0, num_complete: 12, num_leechs: 0, num_incomplete: 0,
     state: 'error', eta: 8640000, added_on: now - 86400 * 2, completion_on: -1, time_active: 3600, seeding_time: 0,
     downloaded: 0.11 * GiB, uploaded: 0, save_path: '/downloads/apps',
   },
+  {
+    hash: '9a'.repeat(20), name: '国风写真 · 林星阑 [19P]', category: '图片', tags: '写真, 4K',
+    size: 0.86 * GiB, progress: 1, dlspeed: 0, upspeed: 0.62 * MB,
+    num_seeds: 3, num_complete: 64, num_leechs: 0, num_incomplete: 5,
+    state: 'uploading', eta: 8640000, added_on: now - 86400 * 4, completion_on: now - 86400 * 4 + 720,
+    time_active: 86400 * 4, seeding_time: 86400 * 3, downloaded: 0.86 * GiB, uploaded: 1.2 * GiB,
+    save_path: '/downloads/photos',
+  },
 ];
 
 // 补齐 /torrents/info 需要的其余字段
-for (const t of torrents) {
-  Object.assign(t, {
+const normalize = (t) => Object.assign(t, {
     amount_left: t.size * (1 - t.progress),
     auto_tmm: false,
     availability: 1 + (t.num_seeds || 0) / 10,
@@ -142,7 +167,7 @@ for (const t of torrents) {
     total_size: t.size,
     save_path: t.save_path,
   });
-}
+torrents.forEach(normalize);
 
 const sum = (fn) => torrents.reduce((a, t) => a + fn(t), 0);
 
@@ -213,27 +238,26 @@ const properties = (t) => ({
   up_speed_avg: t.upspeed * 0.85,
 });
 
+/** hash -> [{ name, size }]，由 buildMedia() 按真实落盘文件生成，
+    让 /torrents/files 返回的名字和磁盘一一对应（预览就是靠它定位文件） */
+const MEDIA_FILES = new Map();
+
 const files = (t) => {
-  const extras = [
-    ['SHA256SUMS', 1214],
-    ['README.txt', 3480],
-    ['torrent/announce.txt', 618],
-    ['torrent/verify.sh', 8220],
-  ];
-  const isMovie = t.size > 10 * GiB;
-  const entries = isMovie
-    ? [
-        { name: 'Disc1 - Sintel (2010) 2160p.mkv', size: t.size * 0.30 },
-        { name: 'Disc1 - Tears of Steel (2012) 2160p.mkv', size: t.size * 0.24 },
-        { name: 'Disc2 - Cosmos Laundromat (2015) 2160p.mkv', size: t.size * 0.21 },
-        { name: 'Disc2 - Spring (2019) 2160p.mkv', size: t.size * 0.18 },
-        { name: 'poster.jpg', size: 2.1 * MB },
-      ]
-    : [
-        { name: t.name, size: t.size - extras.reduce((a, [, size]) => a + size, 0) },
-        ...extras.map(([name, size]) => ({ name, size })),
-      ];
-  return entries.map((f, i) => ({
+  const list = MEDIA_FILES.get(t.hash);
+  if (!list?.length) {
+    // 演示里临时添加的种子没有真实文件；给它一条主文件，预览会 404，属预期
+    const ext = path.extname(t.name) ? '' : `.${mainFileExt(t)}`;
+    return [{
+      index: 0,
+      name: `${t.name}${ext}`,
+      size: Math.max(1, Math.round(t.size)),
+      progress: t.progress || 0,
+      priority: 1,
+      is_seed: t.progress >= 1,
+      piece_range: [0, 0],
+    }];
+  }
+  return list.map((f, i) => ({
     index: i,
     name: f.name,
     size: Math.max(1, Math.round(f.size)),
@@ -262,7 +286,10 @@ const trackers = () => [
 const categories = {
   系统镜像: { name: '系统镜像', savePath: '/downloads/iso' },
   影视: { name: '影视', savePath: '/downloads/media' },
+  音乐: { name: '音乐', savePath: '/downloads/media' },
+  书籍: { name: '书籍', savePath: '/downloads/books' },
   软件: { name: '软件', savePath: '/downloads/apps' },
+  图片: { name: '图片', savePath: '/downloads/photos' },
 };
 
 const json = (res, data, status = 200) => {
@@ -303,33 +330,148 @@ function posterSvg(title, sub, i) {
 </svg>`;
 }
 
+/* 按分类给演示种子造一个「像真的」主文件：体积远大于海报，
+   这样 /__cover 的类型判定（按体积权重）才能测出 video / audio / book 的差别 */
+const KIND_EXT_BY_CAT = { 影视: 'mkv', 音乐: 'flac', 软件: 'zip', 系统镜像: 'iso', 书籍: 'pdf', 图片: 'jpg' };
+
+function mainFileExt(t) {
+  const hit = path.extname(t.name).toLowerCase();
+  if (hit && hit !== '.') return hit.slice(1);
+  return KIND_EXT_BY_CAT[t.category] || 'mkv';
+}
+
+/** 文件 / 目录名里不能出现的字符，替换掉；同时去掉首尾的点 */
+const safeName = (name) => String(name).replace(/[\\/:*?"<>|]/g, '-').replace(/^\.+|\.+$/g, '') || 'demo';
+
+const SAMPLE_VIDEO = fileURLToPath(new URL('./assets/demo.mp4', import.meta.url));
+
+const EXTRA_FILES = [
+  ['SHA256SUMS', 1214],
+  ['README.txt', 3480],
+  ['torrent/announce.txt', 618],
+  ['torrent/verify.sh', 8220],
+];
+
+/**
+ * 在 MOCK_MEDIA_DIR 里造出和 /torrents/files 完全一致的真实文件：
+ * - 多文件种子带「种子目录/文件」的路径（qBittorrent 的 name 就是以 save_path 为根的）
+ * - 影视主文件用 tools/assets/demo.mp4，演示视频预览真的能播
+ * - 图片种子造 19 张 SVG，演示上一张 / 下一张浏览
+ * - 其余种子用占位文件撑出体积权重，供封面类型判定
+ */
 function buildMedia() {
   rmSync(MEDIA_DIR, { recursive: true, force: true });
   mkdirSync(MEDIA_DIR, { recursive: true });
-  torrents.forEach((t, i) => {
-    const slug = t.name.replace(/[^a-zA-Z0-9]+/g, '-').replace(/^-|-$/g, '').slice(0, 42).toLowerCase();
-    // 一半做成「单文件直接放在共享下载目录」——这类种子不该去扫共享目录找图
-    if (i % 2 === 0) {
-      const file = path.join(MEDIA_DIR, `${slug}.iso`);
-      writeFileSync(file, `demo placeholder for ${t.name}\n`);
-      t.content_path = file;
-      t.save_path = MEDIA_DIR;
-      return;
+  const filler = Buffer.alloc(256 * 1024, 0x20); // 占位内容，只为让体积权重成立
+  // 这个目录是演示用的，示例视频缺失时退回占位文件，不影响其它接口
+  const writeVideo = (file) => {
+    try {
+      copyFileSync(SAMPLE_VIDEO, file);
+    } catch {
+      writeFileSync(file, filler);
     }
-    const dir = path.join(MEDIA_DIR, `${String(i + 1).padStart(2, '0')}-${slug}`);
-    mkdirSync(path.join(dir, 'extras'), { recursive: true });
-    writeFileSync(path.join(dir, 'poster.svg'), posterSvg(t.name.slice(0, 26), t.category || 'demo', i));
-    writeFileSync(path.join(dir, 'fanart.svg'), posterSvg(`${t.name.slice(0, 20)} · wide`, 'fanart', i + 2));
-    writeFileSync(path.join(dir, 'extras', 'scene-01.svg'), posterSvg('Scene 01', t.category || 'demo', i + 3));
-    writeFileSync(path.join(dir, 'extras', 'scene-02.svg'), posterSvg('Scene 02', t.category || 'demo', i + 4));
-    t.content_path = dir;
-    t.save_path = path.dirname(dir);
+  };
+
+  torrents.forEach((t, i) => {
+    /** @type {{name:string,size:number}[]} */
+    const list = [];
+    const photos = t.category === '图片';
+    const collection = /Open Movies Collection/i.test(t.name);
+    // 名字自带扩展名的（iso / zip / pdf …）天然是单文件种子；没扩展名的才按奇偶拆出
+    // 一部分「种子目录 + 多文件」的形态，和真实 qBittorrent 的保存结构一致
+    const multi = photos || collection || (!path.extname(t.name) && i % 2 === 1);
+    const extrasSize = EXTRA_FILES.reduce((a, [, size]) => a + size, 0);
+    const dirName = safeName(t.name);
+
+    const addExtras = (dir, prefix) => {
+      for (const [rel, size] of EXTRA_FILES) {
+        const file = path.join(dir, rel);
+        mkdirSync(path.dirname(file), { recursive: true });
+        writeFileSync(file, Buffer.alloc(size, 0x20));
+        list.push({ name: prefix + rel, size });
+      }
+    };
+    const addArtwork = (dir, prefix) => {
+      const art = [
+        ['poster.svg', posterSvg(t.name.slice(0, 26), t.category || 'demo', i)],
+        ['fanart.svg', posterSvg(`${t.name.slice(0, 20)} · wide`, 'fanart', i + 2)],
+        ['extras/scene-01.svg', posterSvg('Scene 01', t.category || 'demo', i + 3)],
+        ['extras/scene-02.svg', posterSvg('Scene 02', t.category || 'demo', i + 4)],
+      ];
+      for (const [rel, svg] of art) {
+        const file = path.join(dir, rel);
+        mkdirSync(path.dirname(file), { recursive: true });
+        writeFileSync(file, svg);
+        list.push({ name: prefix + rel, size: Buffer.byteLength(svg) });
+      }
+    };
+
+    if (multi) {
+      const dir = path.join(MEDIA_DIR, dirName);
+      mkdirSync(dir, { recursive: true });
+      t.save_path = MEDIA_DIR;
+      t.content_path = dir;
+      const prefix = `${dirName}/`;
+
+      if (photos) {
+        // 19 张竖图，正好演示图片浏览的翻页 / 键盘 / 滑动
+        const count = 19;
+        for (let k = 1; k <= count; k++) {
+          const name = `${String(k).padStart(2, '0')}.svg`;
+          const svg = posterSvg(`写真 ${String(k).padStart(2, '0')}`, `demo photo set · ${k}/${count}`, i + k);
+          writeFileSync(path.join(dir, name), svg);
+          list.push({ name: prefix + name, size: t.size / count });
+        }
+      } else if (collection) {
+        // 四部短片：演示多视频的「上一个 / 下一个」
+        const episodes = [
+          ['Disc1 - Sintel (2010) 2160p.mp4', 0.30],
+          ['Disc1 - Tears of Steel (2012) 2160p.mp4', 0.24],
+          ['Disc2 - Cosmos Laundromat (2015) 2160p.mp4', 0.21],
+          ['Disc2 - Spring (2019) 2160p.mp4', 0.18],
+        ];
+        for (const [name, share] of episodes) {
+          writeVideo(path.join(dir, name));
+          list.push({ name: prefix + name, size: t.size * share });
+        }
+      } else {
+        const ext = t.category === '影视' ? '.mp4' : `.${mainFileExt(t)}`;
+        const mainName = `${dirName}${ext}`;
+        if (ext === '.mp4') writeVideo(path.join(dir, mainName));
+        else writeFileSync(path.join(dir, mainName), filler);
+        list.push({ name: prefix + mainName, size: t.size - extrasSize });
+      }
+
+      addArtwork(dir, prefix);
+      addExtras(dir, prefix);
+    } else {
+      const ext = path.extname(t.name).toLowerCase() || `.${mainFileExt(t)}`;
+      const mainName = path.extname(t.name) ? t.name : `${t.name}${ext}`;
+      const file = path.join(MEDIA_DIR, mainName);
+      if (ext === '.mp4') writeVideo(file);
+      else writeFileSync(file, filler);
+      t.save_path = MEDIA_DIR;
+      t.content_path = file;
+      list.push({ name: mainName, size: t.size - extrasSize });
+      addExtras(MEDIA_DIR, '');
+    }
+
+    MEDIA_FILES.set(t.hash, list);
   });
 }
 
 if (MEDIA_DIR) buildMedia();
 
-const server = http.createServer((req, res) => {
+function readBody(req) {
+  return new Promise((resolve) => {
+    const chunks = [];
+    req.on('data', (c) => chunks.push(c));
+    req.on('end', () => resolve(Buffer.concat(chunks)));
+    req.on('error', () => resolve(Buffer.alloc(0)));
+  });
+}
+
+const server = http.createServer(async (req, res) => {
   const url = new URL(req.url || '/', 'http://placeholder');
   const p = url.pathname;
   const hash = url.searchParams.get('hash');
@@ -353,6 +495,47 @@ const server = http.createServer((req, res) => {
     const want = hashes.split('|');
     return json(res, torrents.filter((t) => want.includes(t.hash)));
   }
+  // 添加种子：真的往列表里塞一条，才能演示「添加时就把类型写进缓存」这条链路
+  if (p === '/api/v2/torrents/add' && req.method === 'POST') {
+    const buf = await readBody(req);
+    const raw = buf.toString('latin1');
+    const field = (name) => {
+      const m = raw.match(new RegExp(`name="${name}"[\\s\\S]{0,120}?\\r\\n\\r\\n([\\s\\S]*?)\\r\\n--`));
+      // multipart 里的中文是 UTF-8 字节，按 latin1 取出后再转回来
+      return m ? Buffer.from(m[1].trim(), 'latin1').toString('utf8') : '';
+    };
+    const urls = field('urls');
+    const file = (raw.match(/filename="([^"]+\.torrent)"/) || [])[1] || '';
+    const category = field('category');
+    const savepath = field('savepath');
+    let name = '';
+    if (urls) {
+      const dn = /[?&]dn=([^&]+)/.exec(urls);
+      name = dn ? decodeURIComponent(dn[1].replace(/\+/g, ' ')) : urls.split('\n')[0].slice(0, 60);
+    } else if (file) {
+      name = file.replace(/\.torrent$/i, '');
+    }
+    if (name) {
+      const t = {
+        hash: randomBytes(20).toString('hex'),
+        name,
+        category: category || '',
+        tags: field('tags'),
+        size: 4 * GiB, progress: 0, dlspeed: 0, upspeed: 0,
+        num_seeds: 0, num_complete: 0, num_leechs: 0, num_incomplete: 0,
+        state: 'downloading', eta: 3600, added_on: Math.floor(Date.now() / 1000),
+        completion_on: -1, time_active: 0, seeding_time: 0, downloaded: 0, uploaded: 0,
+        save_path: savepath || '/downloads',
+      };
+      normalize(t);
+      t.content_path = `${t.save_path}/${name}`; // 还没落盘：目录不存在，类型只能靠文件清单判定
+      torrents.unshift(t);
+      console.log(`[mock-qb] 添加种子：${name}${category ? ` (${category})` : ''}`);
+    }
+    res.writeHead(200, { 'content-type': 'text/plain' });
+    return res.end('Ok.');
+  }
+
   if (p === '/api/v2/torrents/categories') return json(res, categories);
   if (p === '/api/v2/torrents/properties') {
     const t = torrents.find((x) => x.hash === hash);

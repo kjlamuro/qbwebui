@@ -35,12 +35,17 @@ const shutdown = () => {
 process.on('SIGINT', shutdown);
 process.on('SIGTERM', shutdown);
 
-run(path.join(ROOT, 'tools', 'mock-qb.mjs'), [String(MOCK_PORT)]);
+run(path.join(ROOT, 'tools', 'mock-qb.mjs'), [String(MOCK_PORT)], {
+  // 假种子也要有真实文件，详情页的图片 / 视频预览才有东西可看
+  MOCK_MEDIA_DIR: path.join(ROOT, 'data', 'demo-media'),
+});
 
 setTimeout(() => {
   const app = run(path.join(ROOT, 'server.mjs'), [], {
     QB_URL: `http://127.0.0.1:${MOCK_PORT}`,
     PORT: String(PORT),
+    // 演示数据单独放一个目录，别把封面 / 扫描缓存写进真实实例的 data/
+    QBWEBUI_DATA_DIR: path.join(ROOT, 'data', 'demo'),
   });
   app.on('exit', (code) => {
     shutdown();

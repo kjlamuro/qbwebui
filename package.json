@@ -26,7 +26,8 @@
     "start": "node server.mjs",
     "dev": "node server.mjs",
     "demo": "node tools/demo.mjs",
-    "check": "node --check server.mjs && node --check lib/covers.mjs && node --check public/app.js"
+    "shots": "node tools/shots.mjs",
+    "check": "node --check server.mjs && node --check lib/covers.mjs && node --check lib/tvdb.mjs && node --check public/app.js && node --check tools/mock-qb.mjs && node --check tools/demo.mjs && node --check tools/shots.mjs"
   },
   "engines": {
     "node": ">=18"

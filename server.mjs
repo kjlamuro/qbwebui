@@ -22,7 +22,9 @@ import { createCovers } from './lib/covers.mjs';
 const ROOT = path.dirname(fileURLToPath(import.meta.url));
 const PUBLIC_DIR = path.join(ROOT, 'public');
 const CONFIG_PATH = path.join(ROOT, 'config.json');
-const DATA_DIR = path.join(ROOT, 'data');
+const DATA_DIR = process.env.QBWEBUI_DATA_DIR
+  ? path.resolve(ROOT, process.env.QBWEBUI_DATA_DIR)
+  : path.join(ROOT, 'data');
 
 const MIME = {
   '.html': 'text/html; charset=utf-8',
@@ -41,12 +43,19 @@ const MIME = {
   '.txt': 'text/plain; charset=utf-8',
 };
 
-const config = { port: 7788, target: 'http://127.0.0.1:9898' };
+const config = {
+  port: 7788,
+  target: 'http://127.0.0.1:9898',
+  // 记住的 qBittorrent 登录（「记住我」时写入）。iOS PWA 的 WebKit 会在 7 天不
+  // 交互后清掉 localStorage，浏览器侧记不住密码，就让服务端记住、自动续会话。
+  remember: { username: '', password: '' },
+};
 
 async function loadConfig() {
   try {
     const raw = await readFile(CONFIG_PATH, 'utf8');
     Object.assign(config, JSON.parse(raw));
+    if (Number(config.port) !== 7788) config.filePort = Number(config.port); // 记住文件里配过的端口
   } catch {
     /* 首次运行没有配置文件，用默认值 */
   }
@@ -55,13 +64,60 @@ async function loadConfig() {
   config.target = String(config.target || '').replace(/\/+$/, '');
 }
 
+/**
+ * 只落盘 target 与记住的凭据。端口不写文件——`PORT=7786 node server.mjs` 这种临时
+ * 启动不该把 7786 永久记进配置；端口来自命令行/环境变量，或文件里的可选 port。
+ */
 async function saveConfig() {
-  const data = { port: config.port, target: config.target };
+  const data = { target: config.target, remember: config.remember };
+  if (config.filePort) data.port = config.filePort;
   await writeFile(CONFIG_PATH, JSON.stringify(data, null, 2), 'utf8');
 }
 
 /** qBittorrent 的会话 cookie，由代理统一持有 */
 let sid = null;
+
+/* ── 服务端记住凭据 + 自动续会话（iOS PWA 友好） ────────────── */
+
+const remembered = () => {
+  const r = config.remember || {};
+  return Boolean(String(r.username || '').trim() && String(r.password || '').length);
+};
+
+let autoLogin$ = null;
+let autoLoginFailAt = 0;
+
+/** 没有 SID 时用记住的凭据静默登录一次；失败后 5 秒内不再撞 */
+async function ensureSid() {
+  if (sid || !remembered()) return sid;
+  if (Date.now() - autoLoginFailAt < 5000) return null;
+  autoLogin$ ||= (async () => {
+    try {
+      const body = new URLSearchParams({
+        username: String(config.remember.username),
+        password: String(config.remember.password),
+      });
+      const up = await fetch(targetUrl('/api/v2/auth/login'), {
+        method: 'POST',
+        headers: { 'content-type': 'application/x-www-form-urlencoded', referer: config.target + '/', origin: config.target },
+        body: body.toString(),
+      });
+      const cookies = typeof up.headers.getSetCookie === 'function' ? up.headers.getSetCookie() : [];
+      for (const c of cookies) {
+        const m = /(?:^|;\s*)SID=([^;]+)/.exec(c);
+        if (m) sid = m[1];
+      }
+      if (!sid) autoLoginFailAt = Date.now();
+      return sid;
+    } catch {
+      autoLoginFailAt = Date.now();
+      return null;
+    } finally {
+      autoLogin$ = null;
+    }
+  })();
+  return autoLogin$;
+}
 
 function targetUrl(p) {
   const u = new URL(config.target);
@@ -72,6 +128,8 @@ function targetUrl(p) {
 }
 
 async function proxy(req, res, rawBody) {
+  // 会话失效时先用记住的凭据续上（iOS PWA 里浏览器侧存不住密码，就靠这里）
+  if (!sid) await ensureSid();
   const url = targetUrl(req.url);
   const headers = {};
   if (req.headers['content-type']) headers['content-type'] = req.headers['content-type'];
@@ -140,9 +198,11 @@ async function serveStatic(req, res, urlPath) {
   try {
     const info = await stat(file);
     if (!info.isFile()) throw new Error('not a file');
+    // sw.js 绝不允许被任何一层缓存（尤其 iOS PWA 对 SW 更新检查本来就很懒）
+    const noStore = urlPath.split('?')[0] === '/sw.js';
     res.writeHead(200, {
       'content-type': MIME[path.extname(file).toLowerCase()] || 'application/octet-stream',
-      'cache-control': 'no-cache',
+      'cache-control': noStore ? 'no-store' : 'no-cache',
       'content-length': String(info.size),
     });
     if (req.method === 'HEAD') return res.end();
@@ -199,6 +259,24 @@ const server = http.createServer(async (req, res) => {
       return json(res, 200, { target: config.target });
     }
 
+    if (urlPath.startsWith('/__auth') && req.method === 'POST') {
+      // 记住 / 清除 qBittorrent 凭据（存服务端 config.json，浏览器清不掉）
+      const body = JSON.parse((await readBody(req)).toString('utf8') || '{}');
+      if (body.clear) {
+        config.remember = { username: '', password: '' };
+      } else if (typeof body.username === 'string' && typeof body.password === 'string') {
+        config.remember = { username: body.username.trim(), password: body.password };
+      }
+      await saveConfig();
+      sid = null; // 换凭据后强制重登
+      await ensureSid();
+      return json(res, 200, { remembered: remembered() });
+    }
+
+    if (urlPath.startsWith('/__auth')) {
+      return json(res, 200, { remembered: remembered() });
+    }
+
     if (urlPath.startsWith('/__logout')) {
       try {
         await fetch(targetUrl('/api/v2/auth/logout'), {
@@ -207,6 +285,11 @@ const server = http.createServer(async (req, res) => {
         });
       } catch { /* 忽略 */ }
       sid = null;
+      // 注销即清除记住的凭据，否则下一次请求又会被自动登录
+      if (remembered()) {
+        config.remember = { username: '', password: '' };
+        await saveConfig();
+      }
       return json(res, 200, { ok: true });
     }
 
