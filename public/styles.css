@@ -1071,13 +1071,24 @@ input:checked + .checkbox::after { opacity: 1; transform: rotate(-45deg) scale(1
 .cover-top-info { flex: 1; min-width: 0; display: flex; flex-direction: column; gap: 4px; }
 .cover-name { margin: 0; font-size: 13.5px; font-weight: 600; line-height: 1.45; word-break: break-all; }
 .cover-acts { display: flex; flex-wrap: wrap; gap: 8px; margin-top: 6px; }
+.cover-paste-hint { margin-top: 7px; }
+.cover-paste-hint kbd {
+  font: inherit; font-size: 10px;
+  padding: 0 3px 1px;
+  border: 1px solid var(--line);
+  border-radius: 4px;
+  background: var(--surface-3);
+  color: var(--text-dim);
+}
 
 .cover-sec {
   display: flex; align-items: baseline; justify-content: space-between; gap: 10px;
   font-size: 12px; font-weight: 600; color: var(--text-dim);
 }
+/* 目录路径可能很长：标题行自己截断，右边的张数别被挤成两行 */
+.cover-sec > span { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .cover-sec em { font-style: normal; font-weight: 500; color: var(--text-mute); font-size: 11px; }
-.cover-sec small { color: var(--text-mute); font-weight: 500; font-size: 11px; }
+.cover-sec small { color: var(--text-mute); font-weight: 500; font-size: 11px; flex: none; white-space: nowrap; }
 
 .cover-grid {
   display: grid;

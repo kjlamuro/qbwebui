@@ -2185,6 +2185,10 @@ async function loadTvdbPanel(hash) {
     if (st.current?.name) {
       $('#coverTvdbName').textContent = `《${st.current.name}》`;
       tvdbSetHint(`当前：TheTVDB · ${st.current.type === 'movie' ? '电影' : '剧集'}${st.current.year ? ` ${st.current.year}` : ''}`);
+    } else if (st.mode === 'custom' || st.mode === 'icon') {
+      // 用户自己设过图（上传 / 粘贴 / 用图标）：打开弹窗别再拿自动匹配把它盖掉
+      $('#coverTvdbName').textContent = '';
+      tvdbSetHint(st.mode === 'custom' ? '当前是自定义图片，想换成刮削海报点「自动匹配」' : '当前用的是类型图标，想换海报点「自动匹配」');
     } else {
       tvdbSetHint(st.parsed?.title ? `识别为「${st.parsed.title}」${st.parsed.year ? ` ${st.parsed.year}` : ''}，正在自动匹配…` : '—');
       // 还没刮过的种子：打开就把自动匹配跑掉，命中直接套第一张海报，不命中才留候选给人挑
@@ -2656,7 +2660,7 @@ function resetAddCover() {
   $('#addCoverClear').hidden = true;
   $('#addCoverHint').textContent = '可选';
   $('#addCoverTitle').textContent = '不设置也可以';
-  $('#addCoverDesc').textContent = '默认使用种子目录里的图片，没有就显示类型图标，添加后也能随时更换';
+  $('#addCoverDesc').textContent = '默认用种子目录里的图片，没有就显示类型图标；也可以直接粘贴一张（⌘/Ctrl+V）';
   $('#addScrapeLabel').textContent = '刮削封面';
   $('#addArts').hidden = true;
   $('#addArts').innerHTML = '';
@@ -2811,9 +2815,15 @@ $('#addArts').addEventListener('click', (e) => {
 $('#addCoverBtn').addEventListener('click', () => $('#addCoverFile').click());
 $('#addCoverFile').addEventListener('change', (e) => {
   const file = (e.target.files || [])[0];
-  if (!file) return;
-  if (!/^image\//.test(file.type)) { toast('请选择图片文件', 'err'); e.target.value = ''; return; }
-  if (file.size > 8 * 1024 * 1024) { toast('图片请控制在 8MB 以内', 'err'); e.target.value = ''; return; }
+  e.target.value = '';
+  setAddCoverFile(file);
+});
+
+/** 设置「添加后要用的自定义封面」：选文件、粘贴、拖进来都走这里 */
+function setAddCoverFile(file) {
+  if (!file) return false;
+  if (!/^image\//.test(file.type)) { toast('请选择图片文件', 'err'); return false; }
+  if (file.size > 8 * 1024 * 1024) { toast('图片请控制在 8MB 以内', 'err'); return false; }
   addCoverFile = file;
   addTvdb = null; // 自定义图优先，刮削结果作废
   if (addCoverUrl) URL.revokeObjectURL(addCoverUrl);
@@ -2822,11 +2832,54 @@ $('#addCoverFile').addEventListener('change', (e) => {
   box.innerHTML = `<img src="${addCoverUrl}" alt="" />`;
   box.classList.add('has-img');
   $('#addCoverClear').hidden = false;
-  $('#addCoverHint').textContent = file.name;
+  $('#addCoverHint').textContent = file.name || '已粘贴的图片';
   $('#addCoverTitle').textContent = '自定义图片';
   $('#addCoverDesc').textContent = '添加后按这张设置；想换回刮削的海报点「刮削封面」';
   $('#addArts').hidden = true;
   $('#addArts').innerHTML = '';
+  return true;
+}
+
+/**
+ * 剪贴板里的图片。截图工具（⌘⇧4）、网页右键「复制图片」、本地图片复制都会进 items 的
+ * image/* 里；老浏览器只给 files，一起兜住。
+ */
+function clipboardImage(e) {
+  const dt = e.clipboardData;
+  if (!dt) return null;
+  for (const item of dt.items || []) {
+    if (item.kind === 'file' && /^image\//.test(item.type)) {
+      const file = item.getAsFile();
+      if (file) return file;
+    }
+  }
+  for (const file of dt.files || []) {
+    if (/^image\//.test(file.type)) return file;
+  }
+  return null;
+}
+
+/** 正在输入框里打字时，粘贴该走浏览器的默认行为（比如往关键词框里粘文字） */
+function isTypingTarget(node) {
+  const check = (el) => !!el && (el.tagName === 'INPUT' || el.tagName === 'TEXTAREA' || el.isContentEditable);
+  return check(node) || check(document.activeElement);
+}
+
+// ⌘/Ctrl+V 直接贴一张图当封面：封面弹窗立刻落盘；添加弹窗先预览，添加成功后落盘
+document.addEventListener('paste', async (e) => {
+  if (isTypingTarget(e.target)) return;
+  const file = clipboardImage(e);
+  if (!file) return;
+  if (!$('#coverModal').hidden && coverHash) {
+    e.preventDefault();
+    const ok = await uploadCoverFile(coverHash, file);
+    if (ok) toast('已粘贴封面', 'ok');
+    return;
+  }
+  if (!$('#addModal').hidden) {
+    e.preventDefault();
+    if (setAddCoverFile(file)) toast('已粘贴封面，添加后自动套用', 'ok');
+  }
 });
 $('#addCoverClear').addEventListener('click', resetAddCover);
 

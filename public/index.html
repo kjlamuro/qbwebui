@@ -13,7 +13,7 @@
 <link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'><rect width='32' height='32' rx='9' fill='%236c8cff'/><path d='M16 8v12m0 0l-4.5-4.5M16 20l4.5-4.5M9 24h14' stroke='white' stroke-width='2.4' stroke-linecap='round' stroke-linejoin='round' fill='none'/></svg>" />
 <!-- ?v= 是资源版本号：改 styles.css / app.js 必须同步改这里，iOS PWA 的 Service Worker
      更新不可靠，靠 URL 变化强制绕过旧缓存。sw.js 的 SHELL 列表也要同步。 -->
-<link rel="stylesheet" href="styles.css?v=20261024ah" />
+<link rel="stylesheet" href="styles.css?v=20261024ai" />
 <link rel="manifest" href="manifest.webmanifest" />
 <link rel="apple-touch-icon" href="icon-180.png" />
 <meta name="apple-mobile-web-app-title" content="qBWebUI" />
@@ -364,9 +364,9 @@
           <div class="cover-pick-box" id="addCoverBox"><svg><use href="#i-image"/></svg></div>
           <div class="cover-pick-main">
             <b id="addCoverTitle">不设置也可以</b>
-            <small id="addCoverDesc">默认使用种子目录里的图片，没有就显示类型图标，添加后也能随时更换</small>
+            <small id="addCoverDesc">默认用种子目录里的图片，没有就显示类型图标；也可以直接粘贴一张（⌘/Ctrl+V）</small>
             <div class="cover-pick-actions">
-              <button class="btn btn-ghost btn-sm" id="addCoverBtn" type="button"><svg><use href="#i-upload"/></svg>选择图片</button>
+              <button class="btn btn-ghost btn-sm" id="addCoverBtn" type="button" title="选择图片，或直接 ⌘/Ctrl+V 粘贴"><svg><use href="#i-upload"/></svg>选择图片</button>
               <button class="btn btn-ghost btn-sm" id="addCoverClear" type="button" hidden>移除</button>
             </div>
           </div>
@@ -405,10 +405,11 @@
           <p class="hint" id="coverMode">—</p>
           <p class="hint" id="coverKind"></p>
           <div class="cover-acts">
-            <button class="btn btn-soft btn-sm" id="coverUpload"><svg><use href="#i-upload"/></svg>上传</button>
+            <button class="btn btn-soft btn-sm" id="coverUpload" title="选择图片，或直接 ⌘/Ctrl+V 粘贴"><svg><use href="#i-upload"/></svg>上传</button>
             <button class="btn btn-soft btn-sm" id="coverIcon"><svg><use href="#i-image"/></svg>用图标</button>
             <button class="btn btn-ghost btn-sm" id="coverAuto"><svg><use href="#i-refresh"/></svg>自动</button>
           </div>
+          <p class="hint cover-paste-hint">也可以直接 <kbd>⌘</kbd>/<kbd>Ctrl</kbd> + <kbd>V</kbd> 粘贴一张图</p>
         </div>
         <input type="file" id="coverFile" accept="image/*" hidden />
       </div>
@@ -621,6 +622,6 @@
 
 <div class="toasts" id="toasts"></div>
 
-<script type="module" src="app.js?v=20261024ah"></script>
+<script type="module" src="app.js?v=20261024ai"></script>
 </body>
 </html>
