@@ -6,9 +6,9 @@
  *       /api/* 与 /__* 动态接口一律直连不缓存（数据必须新鲜，封面图也会变）。
  * 版本：改任何壳文件后把 V 换个号，activate 时清掉旧缓存。
  */
-const V = 'qbwebui-v49';
+const V = 'qbwebui-v50';
 /* 与 index.html 里的 ?v= 保持一致：URL 变了旧缓存自然失效 */
-const SHELL = ['/', '/styles.css?v=20261024ar', '/app.js?v=20261024ar', '/icon-180.png', '/icon.svg', '/icon-512.png', '/manifest.webmanifest'];
+const SHELL = ['/', '/styles.css?v=20261024as', '/app.js?v=20261024as', '/icon-180.png', '/icon.svg', '/icon-512.png', '/manifest.webmanifest'];
 
 self.addEventListener('install', (e) => {
   e.waitUntil(

@@ -161,7 +161,12 @@ small { font-size: 11px; }
 /* ══════════ 骨架 ══════════ */
 .app {
   display: grid;
-  grid-template-columns: 268px minmax(0, 1fr);
+  /* 侧栏宽度走变量：桌面端收起时置 0，列表自己把空出来的宽度吃掉。
+     过渡只加在 grid-template-columns 上，轨道数量与结构不变（268px → 0px 同构），
+     Chrome / Safari 16+ 都能平滑插值，老浏览器退化成瞬间切换，不影响使用。 */
+  --side-w: 268px;
+  grid-template-columns: var(--side-w) minmax(0, 1fr);
+  transition: grid-template-columns 240ms var(--ease);
   height: 100dvh;
   overflow: hidden;
 }
@@ -1864,6 +1869,8 @@ input:checked + .checkbox::after { opacity: 1; transform: rotate(-45deg) scale(1
 /* 显示控制 */
 .only-mobile { display: none !important; }
 .only-desktop { display: inline-flex; }
+/* 图标按钮本身是 grid 居中的，.only-desktop 的 inline-flex 会盖掉，得补回来 */
+.icon-btn.only-desktop { display: grid; }
 
 /* ══════════════════════════════════════════════════════════
    响应式
@@ -2195,6 +2202,35 @@ input:checked + .checkbox::after { opacity: 1; transform: rotate(-45deg) scale(1
 @media (max-width: 380px) {
   .top-actions .icon-btn { width: 30px; height: 30px; }
   .stat-ico { display: none; }
+}
+
+/* ── 桌面端：侧边栏可收起 ───────────────────────────────
+   只在 >900px 生效：窄屏本来就是把侧边栏当抽屉用，收起状态和抽屉互不干扰
+   （窄屏收起后拉出抽屉，行为与之前完全一致）。 */
+@media (min-width: 901px) {
+  /* 收起 / 展开时，内容必须跟着轨道一起被裁掉：宽度为 0 的那一瞬间，文字会照旧按
+     268px 排版然后画到列表上。桌面端侧栏本来也不会整体滚动（内层 .side-list 自己滚），
+     这里裁掉不影响任何可点区域。 */
+  .sidebar {
+    overflow: hidden;
+    transition: opacity 180ms var(--ease);
+  }
+
+  html[data-side='collapsed'] .app { --side-w: 0px; }
+
+  /* 先淡出再 visibility: hidden —— 既不留残影，也让它彻底退出 Tab 顺序（不会盲点）。 */
+  html[data-side='collapsed'] .sidebar {
+    padding-left: 0;
+    padding-right: 0;
+    border-right: 0;
+    opacity: 0;
+    visibility: hidden;
+    transition: opacity 120ms var(--ease), visibility 0s linear 120ms;
+  }
+
+  /* 收起后状态筛选没有入口了（桌面端平时靠侧栏那几行），把移动端那排 chips 放出来顶上，
+     顺便带上各状态的条数。分类 / 标签仍然在侧栏里，展开即可。 */
+  html[data-side='collapsed'] .chips { display: flex; padding: 10px 20px 2px; }
 }
 
 /* 减少动效 */

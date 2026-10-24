@@ -14,6 +14,7 @@ const LS = {
   kinds: 'qb.kinds',
   listTitle: 'qb.listTitle',
   addMode: 'qb.addMode',
+  sidebar: 'qb.sidebar',
 };
 
 const config = { target: '' };
@@ -3816,6 +3817,35 @@ function closeSidebar() {
 $('#menuBtn').addEventListener('click', openSidebar);
 $('#sideClose').addEventListener('click', closeSidebar);
 $('#scrim').addEventListener('click', closeSidebar);
+
+/* ══════════ 桌面端侧边栏收起 ══════════
+ * 宽度够的时候（>900px）桌面布局是「268px 侧栏 + 列表」，想要更宽的列表就把侧栏收起来。
+ * 状态挂在 <html data-side="collapsed"> 上而不是 #app：head 里的内联脚本要能在首帧前
+ * 就把它设好，避免先画一帧展开态再抽走（闪一下）。窄屏的抽屉逻辑完全不碰这个属性。
+ */
+function sideCollapsed() {
+  return document.documentElement.dataset.side === 'collapsed';
+}
+
+function setSideCollapsed(collapsed, { save = true } = {}) {
+  if (collapsed) document.documentElement.dataset.side = 'collapsed';
+  else delete document.documentElement.dataset.side;
+  const btn = $('#sideToggle');
+  if (btn) {
+    const label = collapsed ? '展开侧边栏' : '收起侧边栏';
+    btn.title = label;
+    btn.setAttribute('aria-label', label);
+    btn.setAttribute('aria-expanded', String(!collapsed));
+    // is-on 表示「侧栏是开着的」，和缩略图、备用限速那两个按钮的语义保持一致
+    btn.classList.toggle('is-on', !collapsed);
+    btn.setAttribute('aria-pressed', String(!collapsed));
+  }
+  if (save) localStorage.setItem(LS.sidebar, collapsed ? '1' : '0');
+}
+
+$('#sideToggle').addEventListener('click', () => setSideCollapsed(!sideCollapsed()));
+// 首帧的 data-side 由 head 内联脚本设好了，这里只同步按钮的 aria / 图标状态，别再写一次存储
+setSideCollapsed(sideCollapsed(), { save: false });
 
 /* ══════════ 主题 ══════════ */
 function applyTheme(mode) {
