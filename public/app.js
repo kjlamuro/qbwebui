@@ -2046,7 +2046,7 @@ async function tvdbSearchNow() {
     if (!q && data.parsed?.title && $('#tvdbQuery').value.trim() === '') $('#tvdbQuery').value = data.parsed.title;
     renderTvdbCandidates(data.items || []);
     // 中英混排的名字会被拆成多个查询词逐个试，说清楚最后是按哪个词搜到的
-    const used = !q && data.query && data.query !== (data.parsed?.title || '') ? ` · 按「${data.query}」搜到` : '';
+    const used = data.query && data.query !== (q || data.parsed?.title || '') ? ` · 按「${data.query}」搜到` : '';
     tvdbSetHint(`识别为「${data.parsed?.title || '—'}」${data.parsed?.year ? ` ${data.parsed.year}` : ''}${data.parsed?.season ? ` 第${data.parsed.season}季` : ''}${used} ${(data.items || []).length} 个结果`);
   } catch (err) {
     tvdbSetHint('搜索失败');
@@ -2564,6 +2564,9 @@ window.visualViewport?.addEventListener('scroll', () => { if (pathMenuState.open
 async function openAddModal() {
   fillCategorySelect();
   resetAddCover();
+  addKwAuto = '';
+  addKwDirty = false;
+  $('#addKw').value = '';
   applyAddMode(addMode);
   openModal('addModal');
   // 只有「链接 / Magnet」这页才需要弹键盘
@@ -2577,6 +2580,7 @@ function applyAddMode(mode) {
   addMode = mode === 'link' ? 'link' : 'file';
   $$('#addSeg .seg-item').forEach((el) => el.classList.toggle('is-active', el.dataset.seg === addMode));
   $$('[data-panel]').forEach((p) => { p.hidden = p.dataset.panel !== addMode; });
+  syncAddKeyword(); // 两种方式各自猜一个关键词，用户改过的就不动
 }
 
 $('#addSeg').addEventListener('click', (e) => {
@@ -2588,6 +2592,7 @@ $('#addSeg').addEventListener('click', (e) => {
 $('#addFile').addEventListener('change', (e) => {
   addFiles = Array.from(e.target.files || []);
   $('#dropText').textContent = addFiles.length ? `已选择 ${addFiles.length} 个文件：${addFiles.map((f) => f.name).join('、')}` : '点击选择或拖入 .torrent 文件';
+  syncAddKeyword(true);
   // 有种子名就顺手刮一次海报，用户什么都不用点
   if (addFiles.length) scrapeAddCover({ auto: true });
 });
@@ -2600,6 +2605,7 @@ dz.addEventListener('drop', (e) => {
   if (files.length) {
     addFiles = files;
     $('#dropText').textContent = `已选择 ${files.length} 个文件：${files.map((f) => f.name).join('、')}`;
+    syncAddKeyword(true);
     scrapeAddCover({ auto: true });
   }
 });
@@ -2609,6 +2615,7 @@ $('#addUrls').addEventListener('paste', () => {
   setTimeout(() => {
     const v = ($('#addUrls').value || '').trim();
     if (!/^magnet:\?/i.test(v) && !/^https?:\/\//i.test(v)) return;
+    syncAddKeyword(true);
     if (!addCoverFile) scrapeAddCover({ auto: true });
   }, 100);
 });
@@ -2636,6 +2643,7 @@ let addCoverUrl = null;
 /* 添加框里刮到的海报：此时种子还没进 qBittorrent，没有 hash，等添加完再按 hash 落盘 */
 let addTvdb = null;
 let addTvdbBusy = false;
+let addScrapeSeq = 0; // 每发起一次刮削 +1，回来的旧结果直接丢掉
 
 function resetAddCover() {
   addCoverFile = null;
@@ -2673,6 +2681,34 @@ function addNameGuess() {
   return (addFiles[0]?.name || '').replace(/\.torrent$/i, '');
 }
 
+/**
+ * 关键词：默认填种子文件名（magnet 取 dn），但它是**可编辑**的——
+ * 种子名里带一堆发布组 / 压制参数时，用户改成「Obsession」这种干净片名往往一次就中。
+ * addKwAuto 记住上次自动填的值，用来判断用户是不是真改过；改回自动值就继续跟着走。
+ */
+let addKwAuto = '';
+let addKwDirty = false;
+
+function syncAddKeyword(force = false) {
+  const guess = addNameGuess();
+  addKwAuto = guess;
+  if (force) addKwDirty = false;
+  if (!addKwDirty) $('#addKw').value = guess;
+}
+
+function addKeyword() {
+  return ($('#addKw').value || '').trim() || addNameGuess();
+}
+
+$('#addKw').addEventListener('input', () => {
+  addKwDirty = $('#addKw').value.trim() !== addKwAuto;
+});
+$('#addKw').addEventListener('keydown', (e) => {
+  if (e.key !== 'Enter') return;
+  e.preventDefault();
+  scrapeAddCover();
+});
+
 function showAddPoster(image) {
   const box = $('#addCoverBox');
   box.innerHTML = `<img src="${esc(image)}" alt="" referrerpolicy="no-referrer" />`;
@@ -2697,13 +2733,15 @@ function renderAddArts(arts, current) {
 
 /** auto = 选了文件 / 粘了链接后顺手跑，失败不弹错 */
 async function scrapeAddCover({ auto = false } = {}) {
-  if (addTvdbBusy) return;
+  // 自动那次正在跑就别再自动跑；但手动点「刮削封面」不受限制——
+  // 用户改完关键词就是想立刻按新词重搜，不该被上一次请求挡住（结果用序号丢弃旧的）
+  if (auto && addTvdbBusy) return;
   if (auto && addCoverFile) return; // 已经手动选了图，别覆盖
   // 设置里选「仅手动」时，选文件 / 粘链接不自动联网，把主动权留给「刮削封面」按钮
   if (auto && state.tvdb.auto !== 'new') return;
-  const name = addNameGuess();
+  const name = addKeyword();
   if (!name) {
-    if (!auto) toast(addMode === 'link' ? '先粘贴 magnet 或链接' : '先选择 .torrent 文件', 'err');
+    if (!auto) toast(addMode === 'link' ? '先粘贴 magnet 或链接，或直接填个关键词' : '先选择 .torrent 文件，或直接填个关键词', 'err');
     return;
   }
   if (!state.tvdb.enabled || !state.tvdb.configured) {
@@ -2711,22 +2749,24 @@ async function scrapeAddCover({ auto = false } = {}) {
     return;
   }
   if (!auto && addCoverFile) resetAddCover(); // 手动点了刮削，就用刮削的替换掉自定义图
+  const my = ++addScrapeSeq;
   addTvdbBusy = true;
   const btn = $('#addScrapeBtn');
-  btn.disabled = true;
+  btn.classList.add('is-busy');
   $('#addScrapeLabel').textContent = '刮削中…';
-  $('#addCoverHint').textContent = '刮削中…';
+  $('#addCoverHint').textContent = `搜索「${name}」…`;
   try {
     const res = await fetch(`/__cover/tvdb/match?name=${encodeURIComponent(name)}`);
     const data = await res.json().catch(() => ({}));
+    if (my !== addScrapeSeq) return; // 期间又搜了一次，这次结果作废
     if (addCoverFile) return; // 刮削期间用户改用手动选图了
     if (!res.ok) throw new Error(data.message || '刮削失败');
     if (!data.ok) {
       $('#addCoverHint').textContent = '没匹配到';
       if (!auto) {
         toast(data.reason === 'low-score'
-          ? '没把握是哪一部，可以点「选择图片」手动设'
-          : 'TheTVDB 上没找到这部作品，可以点「选择图片」手动设', 'err');
+          ? '没把握是哪一部，把关键词改得更准一点再试，也可以点「选择图片」手动设'
+          : 'TheTVDB 上没找到这部作品，换个关键词再试，也可以点「选择图片」手动设', 'err');
       }
       return;
     }
@@ -2746,12 +2786,15 @@ async function scrapeAddCover({ auto = false } = {}) {
     $('#addCoverClear').hidden = false;
     toast(`已匹配《${pick.name}》，添加后自动套用海报`, 'ok');
   } catch (err) {
+    if (my !== addScrapeSeq) return;
     $('#addCoverHint').textContent = '刮削失败';
     if (!auto) toast(err.message, 'err');
   } finally {
-    addTvdbBusy = false;
-    btn.disabled = false;
-    $('#addScrapeLabel').textContent = '刮削封面';
+    if (my === addScrapeSeq) {
+      addTvdbBusy = false;
+      btn.classList.remove('is-busy');
+      $('#addScrapeLabel').textContent = '刮削封面';
+    }
   }
 }
 
