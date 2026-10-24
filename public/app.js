@@ -13,6 +13,7 @@ const LS = {
   thumbs: 'qb.thumbs',
   kinds: 'qb.kinds',
   listTitle: 'qb.listTitle',
+  addMode: 'qb.addMode',
 };
 
 const config = { target: '' };
@@ -2261,7 +2262,8 @@ function toast(msg, type = '') {
 }
 
 /* ══════════ 添加种子 ══════════ */
-let addMode = 'link';
+/* 添加方式：file = 种子文件（默认），link = 链接 / Magnet。可在设置里改默认 */
+let addMode = localStorage.getItem(LS.addMode) === 'link' ? 'link' : 'file';
 let addFiles = [];
 
 $('#addBtn').addEventListener('click', openAddModal);
@@ -2562,18 +2564,25 @@ window.visualViewport?.addEventListener('scroll', () => { if (pathMenuState.open
 async function openAddModal() {
   fillCategorySelect();
   resetAddCover();
+  applyAddMode(addMode);
   openModal('addModal');
-  setTimeout(() => { if (!isMobile()) $('#addUrls').focus(); }, 120);
+  // 只有「链接 / Magnet」这页才需要弹键盘
+  setTimeout(() => { if (addMode === 'link' && !isMobile()) $('#addUrls').focus(); }, 120);
   if (!$('#addPath').value) $('#addPath').value = (await loadPrefs()).save_path || '';
   updatePathHint();
+}
+
+/** 切到某一页：段控高亮 + 面板显隐，都走这里，避免两边状态不一致 */
+function applyAddMode(mode) {
+  addMode = mode === 'link' ? 'link' : 'file';
+  $$('#addSeg .seg-item').forEach((el) => el.classList.toggle('is-active', el.dataset.seg === addMode));
+  $$('[data-panel]').forEach((p) => { p.hidden = p.dataset.panel !== addMode; });
 }
 
 $('#addSeg').addEventListener('click', (e) => {
   const item = e.target.closest('[data-seg]');
   if (!item) return;
-  addMode = item.dataset.seg;
-  $$('#addSeg .seg-item').forEach((el) => el.classList.toggle('is-active', el === item));
-  $$('[data-panel]').forEach((p) => { p.hidden = p.dataset.panel !== addMode; });
+  applyAddMode(item.dataset.seg);
 });
 
 $('#addFile').addEventListener('change', (e) => {
@@ -2737,6 +2746,8 @@ async function openSettings() {
   $('#setTheme').value = localStorage.getItem(LS.theme) || 'system';
   $('#setInterval').value = String(state.pollMs);
   $('#setThumbs').checked = state.coverOn;
+  const am = $('#setAddMode');
+  if (am) am.value = addMode;
   const lt = $('#setListTitle');
   if (lt) lt.value = state.listTitleMode;
   refreshCacheInfo();
@@ -3082,6 +3093,12 @@ $('#setInterval').addEventListener('change', (e) => {
 $('#setThumbs').addEventListener('change', (e) => {
   setCoverOn(e.target.checked);
   toast(e.target.checked ? '列表已显示缩略图' : '列表已隐藏缩略图');
+});
+
+$('#setAddMode').addEventListener('change', (e) => {
+  applyAddMode(e.target.value);
+  localStorage.setItem(LS.addMode, addMode);
+  toast(addMode === 'file' ? '添加种子默认用 .torrent 文件' : '添加种子默认用链接 / Magnet');
 });
 
 $('#setListTitle').addEventListener('change', (e) => {

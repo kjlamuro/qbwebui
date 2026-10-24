@@ -13,7 +13,7 @@
 <link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'><rect width='32' height='32' rx='9' fill='%236c8cff'/><path d='M16 8v12m0 0l-4.5-4.5M16 20l4.5-4.5M9 24h14' stroke='white' stroke-width='2.4' stroke-linecap='round' stroke-linejoin='round' fill='none'/></svg>" />
 <!-- ?v= 是资源版本号：改 styles.css / app.js 必须同步改这里，iOS PWA 的 Service Worker
      更新不可靠，靠 URL 变化强制绕过旧缓存。sw.js 的 SHELL 列表也要同步。 -->
-<link rel="stylesheet" href="styles.css?v=20261024ae" />
+<link rel="stylesheet" href="styles.css?v=20261024af" />
 <link rel="manifest" href="manifest.webmanifest" />
 <link rel="apple-touch-icon" href="icon-180.png" />
 <meta name="apple-mobile-web-app-title" content="qBWebUI" />
@@ -327,13 +327,13 @@
     </div>
     <div class="modal-body">
       <div class="seg" id="addSeg">
-        <button class="seg-item is-active" data-seg="link"><svg><use href="#i-link"/></svg>链接 / Magnet</button>
-        <button class="seg-item" data-seg="file"><svg><use href="#i-file"/></svg>种子文件</button>
+        <button class="seg-item" data-seg="link"><svg><use href="#i-link"/></svg>链接 / Magnet</button>
+        <button class="seg-item is-active" data-seg="file"><svg><use href="#i-file"/></svg>种子文件</button>
       </div>
-      <div class="seg-panel" data-panel="link">
+      <div class="seg-panel" data-panel="link" hidden>
         <textarea id="addUrls" class="textarea" rows="4" placeholder="每行一个 magnet 链接或 .torrent 网址&#10;magnet:?xt=urn:btih:…"></textarea>
       </div>
-      <div class="seg-panel" data-panel="file" hidden>
+      <div class="seg-panel" data-panel="file">
         <label class="dropzone" id="dropzone">
           <input type="file" id="addFile" accept=".torrent" multiple hidden />
           <svg><use href="#i-upload"/></svg>
@@ -459,6 +459,17 @@
           <label class="check-line"><input type="checkbox" id="setAltSpeed" /><span class="checkbox"></span>启用备用速度限制</label>
         </div>
         <button class="btn btn-soft" id="setLimitSave">应用限速</button>
+      </div>
+
+      <div class="card-block">
+        <div class="block-title"><svg><use href="#i-plus"/></svg>添加种子</div>
+        <label class="field"><span>默认添加方式</span>
+          <select id="setAddMode">
+            <option value="file">种子文件（.torrent）</option>
+            <option value="link">链接 / Magnet</option>
+          </select>
+        </label>
+        <p class="hint">打开「添加种子」时默认停在哪一页。另一页随时能切，选过的文件和粘过的链接都不会因为切换丢失。</p>
       </div>
 
       <div class="card-block">
@@ -605,6 +616,6 @@
 
 <div class="toasts" id="toasts"></div>
 
-<script type="module" src="app.js?v=20261024ae"></script>
+<script type="module" src="app.js?v=20261024af"></script>
 </body>
 </html>
