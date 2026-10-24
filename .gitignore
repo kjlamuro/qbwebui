@@ -1,0 +1,14 @@
+# 依赖
+node_modules/
+
+# 运行期配置：可能含内网地址，不入库
+config.json
+
+# 编辑器 / 系统
+.DS_Store
+.idea/
+.vscode/
+*.log
+
+# WorkBuddy 本地记录
+.workbuddy/

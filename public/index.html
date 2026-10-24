@@ -1,0 +1,395 @@
+<!DOCTYPE html>
+<html lang="zh-CN" data-theme="dark">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover, maximum-scale=1" />
+<meta name="theme-color" content="#0b0d12" />
+<title>qBWebUI · 下载控制台</title>
+<link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'><rect width='32' height='32' rx='9' fill='%236c8cff'/><path d='M16 8v12m0 0l-4.5-4.5M16 20l4.5-4.5M9 24h14' stroke='white' stroke-width='2.4' stroke-linecap='round' stroke-linejoin='round' fill='none'/></svg>" />
+<link rel="stylesheet" href="styles.css" />
+<link rel="manifest" href="manifest.webmanifest" />
+<link rel="apple-touch-icon" href="icon-180.png" />
+<meta name="apple-mobile-web-app-capable" content="yes" />
+<meta name="apple-mobile-web-app-title" content="qBWebUI" />
+<meta name="apple-mobile-web-app-status-bar-style" content="black-translucent" />
+<script>
+  (function () {
+    try {
+      var saved = localStorage.getItem('qb.theme');
+      var theme = saved || (window.matchMedia('(prefers-color-scheme: light)').matches ? 'light' : 'dark');
+      document.documentElement.dataset.theme = theme;
+      var meta = document.querySelector('meta[name="theme-color"]');
+      if (meta) meta.setAttribute('content', theme === 'light' ? '#f4f5f9' : '#0b0d12');
+    } catch (e) {}
+  })();
+</script>
+</head>
+<body>
+
+<svg class="sprite" aria-hidden="true" xmlns="http://www.w3.org/2000/svg">
+  <symbol id="i-download" viewBox="0 0 24 24"><path d="M12 3v12m0 0 4.5-4.5M12 15 7.5 10.5M4 20h16"/></symbol>
+  <symbol id="i-upload" viewBox="0 0 24 24"><path d="M12 21V9m0 0 4.5 4.5M12 9 7.5 13.5M4 4h16"/></symbol>
+  <symbol id="i-play" viewBox="0 0 24 24"><path d="M7 4.5 19 12 7 19.5z"/></symbol>
+  <symbol id="i-pause" viewBox="0 0 24 24"><path d="M8.5 4.5v15M15.5 4.5v15"/></symbol>
+  <symbol id="i-trash" viewBox="0 0 24 24"><path d="M4 7h16M9 7V4.5h6V7M6.5 7l1 13h9l1-13M10 11v5.5M14 11v5.5"/></symbol>
+  <symbol id="i-plus" viewBox="0 0 24 24"><path d="M12 5v14M5 12h14"/></symbol>
+  <symbol id="i-search" viewBox="0 0 24 24"><circle cx="11" cy="11" r="6.5"/><path d="m16 16 4 4"/></symbol>
+  <symbol id="i-settings" viewBox="0 0 24 24"><circle cx="12" cy="12" r="3"/><path d="M19.4 15a1.7 1.7 0 0 0 .3 1.9l.1.1a2 2 0 1 1-2.8 2.8l-.1-.1a1.7 1.7 0 0 0-2.9 1.2 2 2 0 1 1-4 0 1.7 1.7 0 0 0-2.9-1.2l-.1.1a2 2 0 1 1-2.8-2.8l.1-.1A1.7 1.7 0 0 0 3 15a2 2 0 1 1 0-4 1.7 1.7 0 0 0 1.5-2.9l-.1-.1a2 2 0 1 1 2.8-2.8l.1.1A1.7 1.7 0 0 0 10 4a2 2 0 1 1 4 0 1.7 1.7 0 0 0 2.9 1.5l.1-.1a2 2 0 1 1 2.8 2.8l-.1.1A1.7 1.7 0 0 0 21 11a2 2 0 1 1 0 4 1.7 1.7 0 0 0-1.6 1z"/></symbol>
+  <symbol id="i-sun" viewBox="0 0 24 24"><circle cx="12" cy="12" r="4"/><path d="M12 2v2M12 20v2M4.9 4.9l1.4 1.4M17.7 17.7l1.4 1.4M2 12h2M20 12h2M4.9 19.1l1.4-1.4M17.7 6.3l1.4-1.4"/></symbol>
+  <symbol id="i-moon" viewBox="0 0 24 24"><path d="M20 14.5A8.5 8.5 0 0 1 9.5 4a8.5 8.5 0 1 0 10.5 10.5z"/></symbol>
+  <symbol id="i-x" viewBox="0 0 24 24"><path d="M6 6l12 12M18 6 6 18"/></symbol>
+  <symbol id="i-chevron-down" viewBox="0 0 24 24"><path d="m6 9 6 6 6-6"/></symbol>
+  <symbol id="i-chevron-right" viewBox="0 0 24 24"><path d="m9 6 6 6-6 6"/></symbol>
+  <symbol id="i-grid" viewBox="0 0 24 24"><rect x="3.5" y="3.5" width="7" height="7" rx="2"/><rect x="13.5" y="3.5" width="7" height="7" rx="2"/><rect x="3.5" y="13.5" width="7" height="7" rx="2"/><rect x="13.5" y="13.5" width="7" height="7" rx="2"/></symbol>
+  <symbol id="i-list" viewBox="0 0 24 24"><path d="M8 6h13M8 12h13M8 18h13M3.5 6h.01M3.5 12h.01M3.5 18h.01"/></symbol>
+  <symbol id="i-clock" viewBox="0 0 24 24"><circle cx="12" cy="12" r="8.5"/><path d="M12 7.5V12l3 2"/></symbol>
+  <symbol id="i-folder" viewBox="0 0 24 24"><path d="M3.5 7.5A2.5 2.5 0 0 1 6 5h3.5l2 2.5H18a2.5 2.5 0 0 1 2.5 2.5v7A2.5 2.5 0 0 1 18 19.5H6A2.5 2.5 0 0 1 3.5 17z"/></symbol>
+  <symbol id="i-tag" viewBox="0 0 24 24"><path d="M20 13.2 13.2 20a2 2 0 0 1-2.8 0l-6.4-6.4A2 2 0 0 1 3.4 12V5a1.6 1.6 0 0 1 1.6-1.6h7a2 2 0 0 1 1.4.6l6.6 6.6a2 2 0 0 1 0 2.6z"/><circle cx="8" cy="8" r="1.4"/></symbol>
+  <symbol id="i-hdd" viewBox="0 0 24 24"><rect x="3" y="5.5" width="18" height="13" rx="3"/><path d="M3 14h18M16.5 17h.01"/></symbol>
+  <symbol id="i-wifi" viewBox="0 0 24 24"><path d="M2.5 8.5a14 14 0 0 1 19 0M6 12a9 9 0 0 1 12 0M9.5 15.5a4.5 4.5 0 0 1 5 0"/><circle cx="12" cy="19" r=".8" fill="currentColor"/></symbol>
+  <symbol id="i-users" viewBox="0 0 24 24"><circle cx="9" cy="8" r="3.2"/><path d="M3 20c0-3.3 2.7-5.5 6-5.5s6 2.2 6 5.5"/><path d="M16 5.2a3 3 0 0 1 0 5.6M18 20c0-2.4-.8-4.2-2.2-5.2"/></symbol>
+  <symbol id="i-activity" viewBox="0 0 24 24"><path d="M3 12h3.5l2.5-7 4 14 2.5-7H21"/></symbol>
+  <symbol id="i-check" viewBox="0 0 24 24"><path d="m5 12.5 4.5 4.5L19 7"/></symbol>
+  <symbol id="i-more" viewBox="0 0 24 24"><circle cx="6" cy="12" r="1.3" fill="currentColor"/><circle cx="12" cy="12" r="1.3" fill="currentColor"/><circle cx="18" cy="12" r="1.3" fill="currentColor"/></symbol>
+  <symbol id="i-link" viewBox="0 0 24 24"><path d="M10 13.8a4 4 0 0 0 5.7 0l2.6-2.6a4 4 0 1 0-5.7-5.7L11.4 6.7"/><path d="M14 10.2a4 4 0 0 0-5.7 0l-2.6 2.6a4 4 0 1 0 5.7 5.7l1.2-1.2"/></symbol>
+  <symbol id="i-file" viewBox="0 0 24 24"><path d="M13.5 3.5H7A2.5 2.5 0 0 0 4.5 6v12A2.5 2.5 0 0 0 7 20.5h10a2.5 2.5 0 0 0 2.5-2.5V9.5z"/><path d="M13.5 3.5v6h6"/></symbol>
+  <symbol id="i-alert" viewBox="0 0 24 24"><path d="M12 4.5 21 20H3z"/><path d="M12 10v4.2M12 17.2h.01"/></symbol>
+  <symbol id="i-speed" viewBox="0 0 24 24"><path d="M4 18a9 9 0 1 1 16 0"/><path d="m12 14 4.5-4.5"/><circle cx="12" cy="15" r="1.6"/></symbol>
+  <symbol id="i-menu" viewBox="0 0 24 24"><path d="M4 7h16M4 12h16M4 17h16"/></symbol>
+  <symbol id="i-filter" viewBox="0 0 24 24"><path d="M4 6h16M7 12h10M10 18h4"/></symbol>
+  <symbol id="i-refresh" viewBox="0 0 24 24"><path d="M20 11a8 8 0 1 0-2.5 6.5"/><path d="M20 5v6h-6"/></symbol>
+  <symbol id="i-lock" viewBox="0 0 24 24"><rect x="4.5" y="10" width="15" height="10" rx="2.5"/><path d="M8 10V7.5a4 4 0 0 1 8 0V10"/></symbol>
+  <symbol id="i-eye" viewBox="0 0 24 24"><path d="M2.5 12S6 5.5 12 5.5 21.5 12 21.5 12 18 18.5 12 18.5 2.5 12 2.5 12z"/><circle cx="12" cy="12" r="3"/></symbol>
+  <symbol id="i-inbox" viewBox="0 0 24 24"><path d="M3.5 13.5 6.5 5h11l3 8.5V18a2.5 2.5 0 0 1-2.5 2.5h-12A2.5 2.5 0 0 1 3.5 18z"/><path d="M3.5 13.5h4l1 2.2h7l1-2.2h4"/></symbol>
+</svg>
+
+<div class="app" id="app">
+
+  <!-- ══════════ 侧边栏 ══════════ -->
+  <aside class="sidebar" id="sidebar">
+    <div class="side-head">
+      <div class="logo">
+        <span class="logo-mark">
+          <svg viewBox="0 0 32 32"><path d="M16 8v12m0 0-4.5-4.5M16 20l4.5-4.5M9 24h14" /></svg>
+        </span>
+        <div class="logo-text">
+          <strong>qBWebUI</strong>
+          <span id="connText">连接中…</span>
+        </div>
+      </div>
+      <button class="icon-btn only-mobile" id="sideClose" aria-label="关闭">
+        <svg><use href="#i-x"/></svg>
+      </button>
+    </div>
+
+    <nav class="side-nav" id="filterNav">
+      <a class="nav-item" data-filter="all"><i class="dot dot-all"></i><span>全部</span><b data-count="all">0</b></a>
+      <a class="nav-item" data-filter="downloading"><i class="dot dot-dl"></i><span>下载中</span><b data-count="downloading">0</b></a>
+      <a class="nav-item" data-filter="seeding"><i class="dot dot-seed"></i><span>做种中</span><b data-count="seeding">0</b></a>
+      <a class="nav-item" data-filter="completed"><i class="dot dot-done"></i><span>已完成</span><b data-count="completed">0</b></a>
+      <a class="nav-item" data-filter="paused"><i class="dot dot-pause"></i><span>已暂停</span><b data-count="paused">0</b></a>
+      <a class="nav-item" data-filter="error"><i class="dot dot-err"></i><span>错误</span><b data-count="error">0</b></a>
+    </nav>
+
+    <div class="side-section">
+      <div class="side-title">分类 <button class="mini-btn" id="newCatBtn" title="新建分类"><svg><use href="#i-plus"/></svg></button></div>
+      <div class="side-list" id="catList"></div>
+    </div>
+
+    <div class="side-section">
+      <div class="side-title">标签</div>
+      <div class="tag-cloud" id="tagList"></div>
+    </div>
+
+    <div class="side-foot">
+      <div class="speed-block">
+        <div class="sp sp-dl">
+          <span class="sp-ico"><svg><use href="#i-download"/></svg></span>
+          <div><b id="sideDl">0 B/s</b><small>下载</small></div>
+        </div>
+        <div class="sp sp-up">
+          <span class="sp-ico"><svg><use href="#i-upload"/></svg></span>
+          <div><b id="sideUp">0 B/s</b><small>上传</small></div>
+        </div>
+      </div>
+      <div class="side-meter">
+        <div class="meter-row"><span><svg><use href="#i-hdd"/></svg> 剩余空间</span><b id="sideFree">—</b></div>
+        <div class="meter-bar"><i id="sideFreeBar" style="width:0%"></i></div>
+      </div>
+    </div>
+  </aside>
+  <div class="scrim" id="scrim"></div>
+
+  <!-- ══════════ 主区域 ══════════ -->
+  <main class="main">
+    <header class="topbar">
+      <button class="icon-btn only-mobile" id="menuBtn" aria-label="菜单"><svg><use href="#i-menu"/></svg></button>
+
+      <div class="search">
+        <svg class="search-ico"><use href="#i-search"/></svg>
+        <input id="searchInput" type="search" placeholder="搜索种子名称…" autocomplete="off" spellcheck="false" />
+        <kbd class="search-kbd">/</kbd>
+      </div>
+
+      <div class="top-stats">
+        <div class="stat">
+          <span class="stat-ico dl"><svg><use href="#i-download"/></svg></span>
+          <div><b id="topDl">0 B/s</b><small>下载</small></div>
+        </div>
+        <div class="stat">
+          <span class="stat-ico up"><svg><use href="#i-upload"/></svg></span>
+          <div><b id="topUp">0 B/s</b><small>上传</small></div>
+        </div>
+        <div class="stat want-wide">
+          <span class="stat-ico"><svg><use href="#i-users"/></svg></span>
+          <div><b id="topPeers">0</b><small>连接</small></div>
+        </div>
+      </div>
+
+      <div class="top-actions">
+        <button class="icon-btn" id="altSpeedBtn" title="备用速度限制"><svg><use href="#i-speed"/></svg></button>
+        <button class="icon-btn" id="themeBtn" title="切换主题"><svg><use href="#i-sun"/></svg></button>
+        <button class="icon-btn" id="settingsBtn" title="设置"><svg><use href="#i-settings"/></svg></button>
+        <button class="btn btn-primary only-desktop" id="addBtn"><svg><use href="#i-plus"/></svg>添加种子</button>
+      </div>
+    </header>
+
+    <div class="chips" id="chips"></div>
+
+    <div class="list-head" id="listHead">
+      <label class="check-wrap"><input type="checkbox" id="selectAll" /><span class="checkbox"></span></label>
+      <button class="col col-name" data-sort="name">名称 <i class="arrow"></i></button>
+      <button class="col" data-sort="size">大小 <i class="arrow"></i></button>
+      <button class="col" data-sort="progress">进度 <i class="arrow"></i></button>
+      <button class="col" data-sort="dlspeed">下载 <i class="arrow"></i></button>
+      <button class="col" data-sort="upspeed">上传 <i class="arrow"></i></button>
+      <button class="col" data-sort="ratio">分享率 <i class="arrow"></i></button>
+      <button class="col" data-sort="eta">剩余 <i class="arrow"></i></button>
+      <button class="col" data-sort="state">状态 <i class="arrow"></i></button>
+      <span class="col-actions">操作</span>
+    </div>
+
+    <div class="list-scroll" id="listScroll">
+      <div class="rows" id="rows"></div>
+      <div class="state-view" id="emptyView" hidden>
+        <div class="empty-art"><svg><use href="#i-inbox"/></svg></div>
+        <p id="emptyTitle">这里还没有种子</p>
+        <span id="emptyDesc">点击右上角「添加种子」开始下载</span>
+        <button class="btn btn-primary" id="emptyAddBtn"><svg><use href="#i-plus"/></svg>添加种子</button>
+      </div>
+      <div class="state-view" id="skeletonView">
+        <div class="sk-row"></div><div class="sk-row"></div><div class="sk-row"></div>
+        <div class="sk-row"></div><div class="sk-row"></div><div class="sk-row"></div>
+      </div>
+    </div>
+
+    <div class="bulkbar" id="bulkbar" hidden>
+      <span class="bulk-count"><b id="bulkNum">0</b> 项已选</span>
+      <div class="bulk-actions">
+        <button class="btn btn-ghost" data-bulk="resume"><svg><use href="#i-play"/></svg><em>恢复</em></button>
+        <button class="btn btn-ghost" data-bulk="pause"><svg><use href="#i-pause"/></svg><em>暂停</em></button>
+        <button class="btn btn-ghost danger" data-bulk="delete"><svg><use href="#i-trash"/></svg><em>删除</em></button>
+        <button class="btn btn-ghost only-desktop" data-bulk="clear"><svg><use href="#i-x"/></svg><em>取消</em></button>
+      </div>
+    </div>
+  </main>
+
+  <!-- ══════════ 移动端底部导航 ══════════ -->
+  <nav class="mobile-nav">
+    <button class="mnav-item is-active" data-mnav="list"><svg><use href="#i-list"/></svg><span>种子</span></button>
+    <button class="mnav-item" data-mnav="filter"><svg><use href="#i-filter"/></svg><span>筛选</span></button>
+    <button class="mnav-fab" id="fabAdd" aria-label="添加种子"><svg><use href="#i-plus"/></svg></button>
+    <button class="mnav-item" data-mnav="stats"><svg><use href="#i-activity"/></svg><span>概览</span></button>
+    <button class="mnav-item" data-mnav="settings"><svg><use href="#i-settings"/></svg><span>设置</span></button>
+  </nav>
+
+  <!-- ══════════ 详情面板 ══════════ -->
+  <aside class="detail" id="detail" aria-hidden="true">
+    <div class="detail-head">
+      <div class="detail-title">
+        <span class="detail-badge" id="detailBadge"></span>
+        <h2 id="detailName">—</h2>
+      </div>
+      <button class="icon-btn" id="detailClose"><svg><use href="#i-x"/></svg></button>
+    </div>
+    <div class="detail-grab"></div>
+    <div class="detail-body" id="detailBody"></div>
+    <div class="detail-foot" id="detailFoot"></div>
+  </aside>
+  <div class="scrim scrim-detail" id="detailScrim"></div>
+
+</div>
+
+<!-- ══════════ 登录 ══════════ -->
+<div class="modal" id="loginModal" hidden>
+  <div class="modal-card login-card">
+    <div class="login-logo"><svg viewBox="0 0 32 32"><path d="M16 8v12m0 0-4.5-4.5M16 20l4.5-4.5M9 24h14"/></svg></div>
+    <h2>登录 qBittorrent</h2>
+    <p class="modal-sub" id="loginTarget">—</p>
+    <form id="loginForm">
+      <label class="field"><span>用户名</span><input type="text" id="loginUser" autocomplete="username" required /></label>
+      <label class="field"><span>密码</span>
+        <span class="pw-wrap"><input type="password" id="loginPass" autocomplete="current-password" required />
+        <button type="button" class="pw-eye" id="pwEye"><svg><use href="#i-eye"/></svg></button></span>
+      </label>
+      <label class="check-line"><input type="checkbox" id="loginRemember" checked /><span class="checkbox"></span>记住这台设备</label>
+      <button class="btn btn-primary btn-block" id="loginSubmit" type="submit">登录</button>
+      <p class="login-err" id="loginErr" hidden></p>
+    </form>
+  </div>
+</div>
+
+<!-- ══════════ 添加种子 ══════════ -->
+<div class="modal" id="addModal" hidden>
+  <div class="modal-card">
+    <div class="modal-head">
+      <h2>添加种子</h2>
+      <button class="icon-btn" data-close="addModal"><svg><use href="#i-x"/></svg></button>
+    </div>
+    <div class="modal-body">
+      <div class="seg" id="addSeg">
+        <button class="seg-item is-active" data-seg="link"><svg><use href="#i-link"/></svg>链接 / Magnet</button>
+        <button class="seg-item" data-seg="file"><svg><use href="#i-file"/></svg>种子文件</button>
+      </div>
+      <div class="seg-panel" data-panel="link">
+        <textarea id="addUrls" class="textarea" rows="4" placeholder="每行一个 magnet 链接或 .torrent 网址&#10;magnet:?xt=urn:btih:…"></textarea>
+      </div>
+      <div class="seg-panel" data-panel="file" hidden>
+        <label class="dropzone" id="dropzone">
+          <input type="file" id="addFile" accept=".torrent" multiple hidden />
+          <svg><use href="#i-upload"/></svg>
+          <b id="dropText">点击选择或拖入 .torrent 文件</b>
+          <small>支持多选</small>
+        </label>
+      </div>
+      <div class="field">
+        <span>保存路径<em class="field-hint" id="pathHint"></em></span>
+        <div class="path-input">
+          <svg class="path-input-ico"><use href="#i-folder"/></svg>
+          <input id="addPath" type="text" placeholder="默认路径" autocomplete="off" spellcheck="false"
+            role="combobox" aria-autocomplete="list" aria-expanded="false" aria-controls="pathMenu" />
+          <button class="path-input-toggle" id="pathToggle" type="button" aria-label="选择历史目录" tabindex="-1">
+            <svg><use href="#i-chevron-down"/></svg>
+          </button>
+        </div>
+      </div>
+      <div class="grid-2">
+        <label class="field"><span>分类</span>
+          <select id="addCategory"></select>
+        </label>
+        <label class="field"><span>标签</span><input id="addTags" type="text" placeholder="用逗号分隔，例如：电影, 4K" /></label>
+      </div>
+      <div class="check-group">
+        <label class="check-line"><input type="checkbox" id="addPaused" /><span class="checkbox"></span>添加后暂停</label>
+        <label class="check-line"><input type="checkbox" id="addSeq" /><span class="checkbox"></span>顺序下载</label>
+      </div>
+    </div>
+    <div class="modal-foot">
+      <button class="btn btn-ghost" data-close="addModal">取消</button>
+      <button class="btn btn-primary" id="addSubmit">开始下载</button>
+    </div>
+  </div>
+</div>
+
+<!-- ══════════ 设置 ══════════ -->
+<div class="modal" id="settingsModal" hidden>
+  <div class="modal-card">
+    <div class="modal-head">
+      <h2>设置</h2>
+      <button class="icon-btn" data-close="settingsModal"><svg><use href="#i-x"/></svg></button>
+    </div>
+    <div class="modal-body">
+      <div class="card-block">
+        <div class="block-title"><svg><use href="#i-wifi"/></svg>qBittorrent 连接</div>
+        <label class="field"><span>WebUI 地址</span><input id="setTarget" type="text" placeholder="http://127.0.0.1:9898" /></label>
+        <p class="hint" id="setLanHint">—</p>
+        <button class="btn btn-soft" id="setTargetSave">保存并重连</button>
+      </div>
+
+      <div class="card-block">
+        <div class="block-title"><svg><use href="#i-speed"/></svg>全局限速</div>
+        <div class="grid-2">
+          <label class="field"><span>下载上限 (KB/s，0 = 不限)</span><input id="setDlLimit" type="number" min="0" step="64" /></label>
+          <label class="field"><span>上传上限 (KB/s，0 = 不限)</span><input id="setUpLimit" type="number" min="0" step="64" /></label>
+        </div>
+        <div class="check-group">
+          <label class="check-line"><input type="checkbox" id="setAltSpeed" /><span class="checkbox"></span>启用备用速度限制</label>
+        </div>
+        <button class="btn btn-soft" id="setLimitSave">应用限速</button>
+      </div>
+
+      <div class="card-block">
+        <div class="block-title"><svg><use href="#i-grid"/></svg>外观</div>
+        <div class="grid-2">
+          <label class="field"><span>主题</span>
+            <select id="setTheme"><option value="system">跟随系统</option><option value="dark">深色</option><option value="light">浅色</option></select>
+          </label>
+          <label class="field"><span>刷新频率</span>
+            <select id="setInterval"><option value="1000">1 秒</option><option value="2000">2 秒</option><option value="5000">5 秒</option><option value="0">手动</option></select>
+          </label>
+        </div>
+      </div>
+
+      <div class="card-block">
+        <div class="block-title"><svg><use href="#i-activity"/></svg>累计流量</div>
+        <div class="mini-stats">
+          <div><small>累计下载</small><b id="setTotalDl">—</b></div>
+          <div><small>累计上传</small><b id="setTotalUp">—</b></div>
+          <div><small>全局分享率</small><b id="setGlobalRatio">—</b></div>
+        </div>
+        <div class="row-actions">
+          <button class="btn btn-ghost" id="setLogout"><svg><use href="#i-lock"/></svg>退出登录</button>
+          <span class="hint">qBWebUI v1.0</span>
+        </div>
+      </div>
+    </div>
+  </div>
+</div>
+
+<!-- ══════════ 概览（移动端） ══════════ -->
+<div class="modal sheet-modal" id="statsModal" hidden>
+  <div class="modal-card sheet-card">
+    <div class="sheet-grab"></div>
+    <div class="modal-head"><h2>概览</h2><button class="icon-btn" data-close="statsModal"><svg><use href="#i-x"/></svg></button></div>
+    <div class="modal-body" id="statsBody"></div>
+  </div>
+</div>
+
+<!-- ══════════ 操作菜单 ══════════ -->
+<div class="modal sheet-modal" id="actionModal" hidden>
+  <div class="modal-card sheet-card action-sheet">
+    <div class="sheet-grab"></div>
+    <div class="sheet-head">
+      <span class="sheet-title" id="sheetTitle"></span>
+      <button class="icon-btn sheet-close" type="button" data-close="actionModal" aria-label="关闭">
+        <svg><use href="#i-x"/></svg>
+      </button>
+    </div>
+    <div class="action-list" id="actionList"></div>
+  </div>
+</div>
+
+<!-- ══════════ 确认框 ══════════ -->
+<div class="modal" id="confirmModal" hidden>
+  <div class="modal-card confirm-card">
+    <div class="confirm-ico"><svg><use href="#i-alert"/></svg></div>
+    <h2 id="confirmTitle">确认操作</h2>
+    <p id="confirmDesc">—</p>
+    <div class="modal-foot">
+      <button class="btn btn-ghost" id="confirmCancel">取消</button>
+      <button class="btn btn-danger" id="confirmOk">确定</button>
+    </div>
+  </div>
+</div>
+
+<!-- 保存路径历史下拉（fixed 定位，避免被弹窗滚动容器裁切） -->
+<div class="path-menu" id="pathMenu" hidden>
+  <div class="path-list" id="pathList" role="listbox" aria-label="历史保存路径"></div>
+  <div class="path-menu-foot" id="pathFoot"></div>
+</div>
+
+<div class="toasts" id="toasts"></div>
+
+<script type="module" src="app.js"></script>
+</body>
+</html>

@@ -1,0 +1,34 @@
+{
+  "name": "qbwebui",
+  "version": "1.0.0",
+  "description": "轻量 qBittorrent WebUI：桌面 / 移动端自适应，零依赖",
+  "type": "module",
+  "license": "MIT",
+  "author": "kjlamuro",
+  "homepage": "https://github.com/kjlamuro/qbwebui#readme",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/kjlamuro/qbwebui.git"
+  },
+  "bugs": {
+    "url": "https://github.com/kjlamuro/qbwebui/issues"
+  },
+  "keywords": [
+    "qbittorrent",
+    "webui",
+    "torrent",
+    "self-hosted",
+    "pwa",
+    "zero-dependency"
+  ],
+  "private": true,
+  "scripts": {
+    "start": "node server.mjs",
+    "dev": "node server.mjs",
+    "demo": "node tools/demo.mjs",
+    "check": "node --check server.mjs && node --check public/app.js"
+  },
+  "engines": {
+    "node": ">=18"
+  }
+}
