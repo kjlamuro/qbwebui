@@ -1466,7 +1466,7 @@ function closeViewer() {
 }
 
 /**
- * 文件页顶部的「浏览图片 / 播放视频」入口。
+ * 文件页顶部的「预览图片 / 预览视频」入口。
  * 图片集里通常有几十上百张，只靠一个个点文件名翻太累，所以这里按类型做前一 / 后一。
  */
 function mediaBarHtml(files) {
@@ -1478,7 +1478,7 @@ function mediaBarHtml(files) {
   const btn = (kind, icon, label) => (counts[kind]
     ? `<button class="d-media-btn" type="button" data-browse="${kind}"><svg><use href="#${icon}"/></svg><span>${label}</span><b>${counts[kind]}</b></button>`
     : '');
-  const html = btn('image', 'i-image', '浏览图片') + btn('video', 'i-play', '播放视频') + btn('audio', 'i-music', '播放音频');
+  const html = btn('image', 'i-image', '预览图片') + btn('video', 'i-play', '预览视频') + btn('audio', 'i-music', '预览音频');
   return html ? `<div class="d-media-bar">${html}</div>` : '';
 }
 
