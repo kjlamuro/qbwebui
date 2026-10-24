@@ -2143,6 +2143,10 @@ body.mv-open { overflow: hidden; }
   flex: 1;
   min-height: 0;
   display: grid;
+  /* 行 / 列都给定死轨道：否则是「自动」轨道，子元素的 max-height: 100%
+     会因为没有确定的参照高度而解析成 none —— 竖图 / 竖视频只被压了宽度，
+     高度按原始比例一路涨出去，超出部分被 overflow 裁掉，看起来就是「位置不对」 */
+  grid-template: minmax(0, 1fr) / minmax(0, 1fr);
   place-items: center;
   padding: 0 16px calc(16px + env(safe-area-inset-bottom));
   /* 放大后的图片不能盖住顶栏；裁切在舞台内，拖动查看被裁掉的部分 */
@@ -2165,17 +2169,22 @@ body.mv-open { overflow: hidden; }
   box-shadow: var(--shadow-lg);
 }
 
-/* 缩放层：图片在层内居中，整层做 translate + scale，原点固定为中心 */
+/* 缩放层：图片在层内居中，整层做 translate + scale，原点固定为中心。
+   用 flex 而不是 grid：flex 容器的高度是确定的，子元素 max-height: 100% 才生效 */
 .mv-zoom {
   position: absolute;
   inset: 0;
-  display: grid;
-  place-items: center;
+  display: flex;
+  align-items: center;
+  justify-content: center;
   transform-origin: center center;
   will-change: transform;
   touch-action: none;
 }
 .mv-zoom img {
+  display: block;
+  width: auto;
+  height: auto;
   max-width: 100%;
   max-height: 100%;
   object-fit: contain;
