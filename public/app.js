@@ -10,6 +10,7 @@ const LS = {
   theme: 'qb.theme',
   interval: 'qb.interval',
   creds: 'qb.creds',
+  thumbs: 'qb.thumbs',
 };
 
 const config = { target: '' };
@@ -37,6 +38,10 @@ const state = {
   prefs: null,
   loggedIn: false,
   pending: new Map(), // 乐观状态覆盖，避免轮询回弹造成的闪烁
+  /* 封面：自定义图 > 目录自动图 > 类型图标 */
+  coverOn: localStorage.getItem('qb.thumbs') !== '0',
+  coverV: new Map(),    // hash -> 版本号，用于刷新图片缓存
+  coverMode: new Map(), // hash -> custom | auto | icon
 };
 
 /* ── 格式化 ───────────────────────────────────────────── */
@@ -197,6 +202,46 @@ async function setPaused(hashes, paused) {
 const rowsEl = $('#rows');
 const rowCache = new Map();
 
+/* ══════════ 封面缩略图 ══════════ */
+/* 解析顺序：自定义上传图 → 种子目录里自动找到的图 → 类型图标（兜底） */
+const COVER_KINDS = [
+  { kind: 'music', icon: 'i-music', re: /(music|audio|album|ost|flac|ape|dts|soundtrack|音乐|专辑|歌曲|演唱会|无损|原声)/i },
+  { kind: 'image', icon: 'i-image', re: /(photo|image|picture|wallpaper|comic|manga|画集|摄影|图片|壁纸|漫画|写真|绘本|图册)/i },
+  { kind: 'film', icon: 'i-film', re: /(movie|film|tv|series|episode|video|anime|documentary|电影|影视|剧集|动画|番剧|综艺|纪录片|视频|纪录)/i },
+  { kind: 'archive', icon: 'i-archive', re: /(software|game|iso|ebook|course|tutorial|软件|游戏|应用|书籍|电子书|课程|教程|文档|教材|学习|素材)/i },
+];
+
+function coverKind(t) {
+  const hay = `${t.category || ''} ${t.name || ''} ${t.tags || ''}`;
+  for (const k of COVER_KINDS) if (k.re.test(hay)) return k;
+  return { kind: 'other', icon: 'i-inbox' };
+}
+
+const coverUrl = (hash) => `/__cover/img?hash=${hash}&v=${state.coverV.get(hash) || 0}`;
+const shortPath = (p) => (p && p.length > 44 ? `…${p.slice(-43)}` : p || '');
+
+/** 让某一行的缩略图重新加载 */
+function bumpCover(hash) {
+  state.coverV.set(hash, Date.now());
+  const t = state.map.get(hash);
+  const el = rowCache.get(hash);
+  if (el && t) { el._v.coverKey = null; updateRow(el, t); }
+}
+
+function setCoverOn(on, render = true) {
+  state.coverOn = on;
+  localStorage.setItem(LS.thumbs, on ? '1' : '0');
+  rowsEl.classList.toggle('has-thumb', on);
+  const btn = $('#thumbBtn');
+  btn.classList.toggle('is-on', on);
+  btn.setAttribute('aria-pressed', String(on));
+  const box = $('#setThumbs');
+  if (box) box.checked = on;
+  if (!render) return;
+  for (const el of rowCache.values()) el._v.coverKey = null;
+  renderRows();
+}
+
 const SORTERS = {
   name: (t) => t.name.toLowerCase(),
   size: (t) => t.size,
@@ -240,7 +285,10 @@ function createRow(t) {
   el.dataset.hash = t.hash;
   el.innerHTML = `
     <div class="cell check"><label class="check-wrap"><input type="checkbox" /><span class="checkbox"></span></label></div>
-    <div class="cell name"><div class="t-name"></div><div class="t-sub"></div></div>
+    <div class="cell name">
+      <div class="thumb" data-act="cover" title="更换封面"><img alt="" loading="lazy" decoding="async" /><svg><use href="#i-inbox"/></svg></div>
+      <div class="t-text"><div class="t-name"></div><div class="t-sub"></div></div>
+    </div>
     <div class="cell size"></div>
     <div class="cell prog"><div class="pbar"><i></i></div><div class="ptext"></div></div>
     <div class="cell dl"><b></b></div>
@@ -253,6 +301,9 @@ function createRow(t) {
   `;
   const refs = {
     check: $('input', el),
+    thumb: $('.thumb', el),
+    thumbImg: $('.thumb img', el),
+    thumbIco: $('.thumb svg use', el),
     name: $('.t-name', el),
     sub: $('.t-sub', el),
     size: $('.size', el),
@@ -269,6 +320,8 @@ function createRow(t) {
   };
   el._refs = refs;
   el._v = {};
+  refs.thumbImg.addEventListener('load', () => refs.thumb.classList.add('has-img'));
+  refs.thumbImg.addEventListener('error', () => refs.thumb.classList.remove('has-img'));
   return el;
 }
 
@@ -276,6 +329,20 @@ function updateRow(el, t) {
   const r = el._refs;
   const v = el._v;
   const st = statusOf(t);
+
+  const coverKey = `${state.coverOn ? 1 : 0}|${state.coverV.get(t.hash) || 0}|${coverKind(t).kind}|${state.coverMode.get(t.hash) || ''}`;
+  if (v.coverKey !== coverKey) {
+    v.coverKey = coverKey;
+    const k = coverKind(t);
+    r.thumb.className = `thumb k-${k.kind}`;
+    r.thumbIco.setAttribute('href', `#${k.icon}`);
+    r.thumb.classList.remove('has-img');
+    if (state.coverOn && state.coverMode.get(t.hash) !== 'icon') {
+      r.thumbImg.src = coverUrl(t.hash);
+    } else {
+      r.thumbImg.removeAttribute('src');
+    }
+  }
 
   if (v.name !== t.name) { r.name.textContent = t.name; r.name.title = t.name; v.name = t.name; }
 
@@ -527,6 +594,7 @@ rowsEl.addEventListener('click', (e) => {
 
   if (e.target.closest('.check-wrap')) return; // 交给 change
   if (e.target.closest('[data-act="menu"]')) { openTorrentMenu(hash); return; }
+  if (e.target.closest('[data-act="cover"]')) { openCoverModal(hash); return; }
   openDetail(hash);
 });
 
@@ -816,6 +884,7 @@ function renderDetail() {
 
   body.innerHTML = `
     <div class="d-hero">
+      <div class="d-cover" data-detail="cover" title="更换封面"><img alt="" loading="lazy" decoding="async" /><svg><use href="#i-inbox"/></svg></div>
       ${ringSvg(t.progress, st.key)}
       <div class="d-hero-info">
         <div class="d-speed">
@@ -831,18 +900,30 @@ function renderDetail() {
     ${tabsHtml}
     ${tabContent}
   `;
+  const dCover = body.querySelector('.d-cover');
+  if (dCover) {
+    const k = coverKind(t);
+    dCover.className = `d-cover k-${k.kind}${state.coverOn ? '' : ' is-off'}`;
+    dCover.querySelector('use').setAttribute('href', `#${k.icon}`);
+    const img = dCover.querySelector('img');
+    img.addEventListener('load', () => dCover.classList.add('has-img'));
+    img.addEventListener('error', () => dCover.classList.remove('has-img'));
+    if (state.coverOn && state.coverMode.get(hash) !== 'icon') img.src = coverUrl(hash);
+  }
   body.scrollTop = prevScroll;
 
   // 底部操作
   const paused = isPaused(t);
   $('#detailFoot').innerHTML = `
     <button class="btn btn-soft" data-detail="toggle">${paused ? '<svg><use href="#i-play"/></svg>继续' : '<svg><use href="#i-pause"/></svg>暂停'}</button>
+    <button class="btn btn-ghost" data-detail="cover"><svg><use href="#i-photo"/></svg>封面</button>
     <button class="btn btn-ghost" data-detail="menu"><svg><use href="#i-more"/></svg>更多</button>
     <button class="btn btn-ghost danger" data-detail="delete"><svg><use href="#i-trash"/></svg>删除</button>
   `;
 }
 
 $('#detailBody').addEventListener('click', async (e) => {
+  if (e.target.closest('[data-detail="cover"]')) { openCoverModal(state.detailHash); return; }
   const tab = e.target.closest('[data-tab]');
   if (tab) {
     state.detailTab = tab.dataset.tab;
@@ -887,6 +968,8 @@ $('#detailFoot').addEventListener('click', async (e) => {
       refreshNow();
     } else if (act === 'menu') {
       openTorrentMenu(t.hash);
+    } else if (act === 'cover') {
+      openCoverModal(t.hash);
     }
   } catch (err) { toast(err.message, 'err'); }
 });
@@ -909,6 +992,7 @@ function openTorrentMenu(hash) {
     <button class="action-item" data-menu="force"><svg><use href="#i-activity"/></svg>${t.force_start ? '取消强制开始' : '强制开始'}</button>
     <button class="action-item" data-menu="seq"><svg><use href="#i-list"/></svg>${t.seq_dl ? '关闭顺序下载' : '顺序下载'}</button>
     <button class="action-item" data-menu="cat"><svg><use href="#i-folder"/></svg>设置分类<small>${esc(t.category || '未分类')}</small></button>
+    <button class="action-item" data-menu="cover"><svg><use href="#i-photo"/></svg>更换封面<small>自定义 / 目录 / 图标</small></button>
     <button class="action-item" data-menu="recheck"><svg><use href="#i-refresh"/></svg>重新校验</button>
     <button class="action-item" data-menu="reannounce"><svg><use href="#i-wifi"/></svg>重新通告 Tracker</button>
     <button class="action-item danger" data-menu="delete"><svg><use href="#i-trash"/></svg>删除种子</button>
@@ -925,6 +1009,7 @@ $('#actionList').addEventListener('click', async (e) => {
   const act = btn.dataset.menu;
 
   if (act === 'cat') { openCategorySheet(hash); return; }
+  if (act === 'cover') { closeModal('actionModal'); openCoverModal(hash); return; }
 
   closeModal('actionModal');
   try {
@@ -965,6 +1050,143 @@ $('#actionList').addEventListener('click', async (e) => {
     await post('/torrents/setCategory', { hashes: hash, category: btn.dataset.setcat });
     toast('分类已更新', 'ok');
     refreshNow();
+  } catch (err) { toast(err.message, 'err'); }
+});
+
+/* ══════════ 封面：上传 / 挑选 / 图标 ══════════ */
+let coverHash = null;
+
+async function coverPost(path, body, hash = coverHash) {
+  const res = await fetch(`${path}?hash=${hash}`, {
+    method: 'POST',
+    headers: { 'content-type': 'application/json' },
+    body: JSON.stringify(body || {}),
+  });
+  const data = await res.json().catch(() => ({}));
+  if (!res.ok) throw new Error(data.message || '操作失败');
+  return data;
+}
+
+async function uploadCoverFile(hash, file) {
+  if (!/^image\//.test(file.type)) { toast('请选择图片文件', 'err'); return false; }
+  if (file.size > 8 * 1024 * 1024) { toast('图片请控制在 8MB 以内', 'err'); return false; }
+  try {
+    const res = await fetch(`/__cover/upload?hash=${hash}`, { method: 'POST', body: file });
+    const data = await res.json().catch(() => ({}));
+    if (!res.ok) throw new Error(data.message || '上传失败');
+    state.coverMode.set(hash, 'custom');
+    bumpCover(hash);
+    if (coverHash === hash) afterCoverChange(hash);
+    else toast('封面已设置', 'ok');
+    return true;
+  } catch (err) {
+    toast(err.message || '封面上传失败', 'err');
+    return false;
+  }
+}
+
+function paintCoverBig() {
+  const t = state.map.get(coverHash);
+  if (!t) return;
+  const k = coverKind(t);
+  const box = $('#coverBig');
+  box.className = `cover-big k-${k.kind}`;
+  box.innerHTML = `<img alt="" /><svg><use href="#${k.icon}"/></svg>`;
+  const img = box.querySelector('img');
+  img.addEventListener('load', () => box.classList.add('has-img'));
+  img.addEventListener('error', () => box.classList.remove('has-img'));
+  if (state.coverMode.get(coverHash) === 'icon') img.removeAttribute('src');
+  else img.src = coverUrl(coverHash);
+}
+
+function afterCoverChange(hash = coverHash) {
+  bumpCover(hash);
+  paintCoverBig();
+  loadCoverCandidates(hash);
+}
+
+async function loadCoverCandidates(hash) {
+  let data = null;
+  try {
+    data = await fetch(`/__cover/candidates?hash=${hash}`).then((r) => r.json());
+  } catch { /* 下面统一处理 */ }
+  if (coverHash !== hash) return; // 已经切到别的种子
+  const grid = $('#coverGrid');
+  if (!data || data.error) {
+    $('#coverMode').textContent = '目录不可用';
+    $('#coverDir').textContent = '';
+    $('#coverCount').textContent = '';
+    grid.innerHTML = '<div class="cover-empty">读取不到这个种子的目录</div>';
+    return;
+  }
+  state.coverMode.set(hash, data.mode);
+  $('#coverMode').textContent =
+    data.mode === 'custom' ? '当前：自定义图片'
+      : data.mode === 'icon' ? '当前：类型图标'
+        : '当前：自动（目录图片 → 类型图标）';
+  $('#coverDir').textContent = shortPath(data.dir);
+  $('#coverCount').textContent = data.count ? `${data.count} 张` : '目录里没找到图片';
+  grid.innerHTML = data.items.length
+    ? data.items.map((it) => `
+      <button class="cover-item" data-rel="${esc(it.rel)}" title="${esc(it.name)}">
+        <img src="/__cover/raw?hash=${hash}&rel=${encodeURIComponent(it.rel)}" alt="" loading="lazy" decoding="async" />
+        <span>${esc(it.name)}</span>
+      </button>`).join('')
+    : '<div class="cover-empty">这个种子的目录里没有可用图片，可以自己上传一张</div>';
+  paintCoverBig();
+}
+
+async function openCoverModal(hash) {
+  const t = state.map.get(hash);
+  if (!t) return;
+  coverHash = hash;
+  $('#coverName').textContent = t.name;
+  $('#coverName').title = t.name;
+  $('#coverMode').textContent = '读取中…';
+  $('#coverDir').textContent = '';
+  $('#coverCount').textContent = '';
+  $('#coverGrid').innerHTML = '<div class="cover-skel"></div><div class="cover-skel"></div><div class="cover-skel"></div><div class="cover-skel"></div>';
+  paintCoverBig();
+  openModal('coverModal');
+  loadCoverCandidates(hash);
+}
+
+$('#coverUpload').addEventListener('click', () => $('#coverFile').click());
+$('#coverFile').addEventListener('change', async (e) => {
+  const file = (e.target.files || [])[0];
+  e.target.value = '';
+  if (!file || !coverHash) return;
+  await uploadCoverFile(coverHash, file);
+});
+
+$('#coverIcon').addEventListener('click', async () => {
+  if (!coverHash) return;
+  try {
+    await coverPost('/__cover/mode', { mode: 'icon' });
+    state.coverMode.set(coverHash, 'icon');
+    afterCoverChange();
+    toast('已改成类型图标', 'ok');
+  } catch (err) { toast(err.message, 'err'); }
+});
+
+$('#coverAuto').addEventListener('click', async () => {
+  if (!coverHash) return;
+  try {
+    await coverPost('/__cover/mode', { mode: 'auto' });
+    state.coverMode.set(coverHash, 'auto');
+    afterCoverChange();
+    toast('已恢复自动封面', 'ok');
+  } catch (err) { toast(err.message, 'err'); }
+});
+
+$('#coverGrid').addEventListener('click', async (e) => {
+  const item = e.target.closest('[data-rel]');
+  if (!item || !coverHash) return;
+  try {
+    await coverPost('/__cover/from-dir', { rel: item.dataset.rel });
+    state.coverMode.set(coverHash, 'custom');
+    afterCoverChange();
+    toast('封面已更换', 'ok');
   } catch (err) { toast(err.message, 'err'); }
 });
 
@@ -1337,6 +1559,7 @@ window.visualViewport?.addEventListener('scroll', () => { if (pathMenuState.open
 
 async function openAddModal() {
   fillCategorySelect();
+  resetAddCover();
   openModal('addModal');
   setTimeout(() => { if (!isMobile()) $('#addUrls').focus(); }, 120);
   if (!$('#addPath').value) $('#addPath').value = (await loadPrefs()).save_path || '';
@@ -1367,6 +1590,57 @@ dz.addEventListener('drop', (e) => {
   }
 });
 
+/** 添加后轮询一会儿，找出新出现的种子哈希（qBittorrent 的 add 接口不返回 hash） */
+async function waitNewHashes(before, timeout = 8000) {
+  const t0 = Date.now();
+  while (Date.now() - t0 < timeout) {
+    await new Promise((r) => setTimeout(r, 500));
+    try {
+      const list = await apiJson('/torrents/info');
+      if (!Array.isArray(list)) continue;
+      state.list = list;
+      state.map = new Map(list.map((t) => [t.hash, t]));
+      const fresh = list.filter((t) => !before.has(t.hash)).map((t) => t.hash);
+      if (fresh.length) return fresh;
+    } catch { /* 继续等 */ }
+  }
+  return [];
+}
+
+/* ── 添加时的封面 ─────────────────────────────────────── */
+let addCoverFile = null;
+let addCoverUrl = null;
+
+function resetAddCover() {
+  addCoverFile = null;
+  if (addCoverUrl) URL.revokeObjectURL(addCoverUrl);
+  addCoverUrl = null;
+  const box = $('#addCoverBox');
+  box.classList.remove('has-img');
+  box.innerHTML = '<svg><use href="#i-image"/></svg>';
+  $('#addCoverClear').hidden = true;
+  $('#addCoverHint').textContent = '可选';
+  const input = $('#addCoverFile');
+  if (input) input.value = '';
+}
+
+$('#addCoverBtn').addEventListener('click', () => $('#addCoverFile').click());
+$('#addCoverFile').addEventListener('change', (e) => {
+  const file = (e.target.files || [])[0];
+  if (!file) return;
+  if (!/^image\//.test(file.type)) { toast('请选择图片文件', 'err'); e.target.value = ''; return; }
+  if (file.size > 8 * 1024 * 1024) { toast('图片请控制在 8MB 以内', 'err'); e.target.value = ''; return; }
+  addCoverFile = file;
+  if (addCoverUrl) URL.revokeObjectURL(addCoverUrl);
+  addCoverUrl = URL.createObjectURL(file);
+  const box = $('#addCoverBox');
+  box.innerHTML = `<img src="${addCoverUrl}" alt="" />`;
+  box.classList.add('has-img');
+  $('#addCoverClear').hidden = false;
+  $('#addCoverHint').textContent = file.name;
+});
+$('#addCoverClear').addEventListener('click', resetAddCover);
+
 function fillCategorySelect() {
   const sel = $('#addCategory');
   const cats = Object.keys(state.categories || {}).sort((a, b) => a.localeCompare(b, 'zh-CN'));
@@ -1395,6 +1669,7 @@ $('#addSubmit').addEventListener('click', async () => {
 
   btn.disabled = true;
   btn.textContent = '添加中…';
+  const before = new Set(state.map.keys());
   try {
     const res = await api('/torrents/add', { method: 'POST', body: fd });
     if (/fail/i.test(res)) throw new Error('qBittorrent 拒绝了该种子');
@@ -1406,6 +1681,19 @@ $('#addSubmit').addEventListener('click', async () => {
     $('#dropText').textContent = '点击选择或拖入 .torrent 文件';
     toast('已添加到下载队列', 'ok');
     refreshNow();
+    // 带着封面添加时，等种子出现在列表里再把图挂上去
+    if (addCoverFile) {
+      const fresh = await waitNewHashes(before);
+      if (!fresh.length) {
+        toast('没找到刚添加的种子，封面未设置', 'err');
+      } else {
+        const file = addCoverFile;
+        const done = await Promise.all(fresh.map((h) => uploadCoverFile(h, file)));
+        if (done.some(Boolean)) toast('封面已设置', 'ok');
+        renderRows();
+      }
+      resetAddCover();
+    }
   } catch (err) {
     toast(err.message || '添加失败', 'err');
   } finally {
@@ -1435,6 +1723,7 @@ async function openSettings() {
   } catch (err) { /* 忽略 */ }
   $('#setTheme').value = localStorage.getItem(LS.theme) || 'system';
   $('#setInterval').value = String(state.pollMs);
+  $('#setThumbs').checked = state.coverOn;
 }
 
 $('#setTargetSave').addEventListener('click', async () => {
@@ -1477,6 +1766,11 @@ $('#setInterval').addEventListener('change', (e) => {
   localStorage.setItem(LS.interval, String(state.pollMs));
   schedule();
   toast(state.pollMs ? `刷新频率 ${state.pollMs / 1000}s` : '已切换为手动刷新');
+});
+
+$('#setThumbs').addEventListener('change', (e) => {
+  setCoverOn(e.target.checked);
+  toast(e.target.checked ? '列表已显示缩略图' : '列表已隐藏缩略图');
 });
 
 $('#setLogout').addEventListener('click', async () => {
@@ -1582,6 +1876,12 @@ $('#themeBtn').addEventListener('click', () => {
 });
 
 $('#altSpeedBtn').addEventListener('click', toggleAltSpeed);
+
+$('#thumbBtn').addEventListener('click', () => {
+  const next = !state.coverOn;
+  setCoverOn(next);
+  toast(next ? '已显示缩略图' : '已隐藏缩略图');
+});
 
 /* ══════════ 登录 ══════════ */
 let loginRetried = false;
@@ -1705,6 +2005,7 @@ document.addEventListener('keydown', (e) => {
 /* ══════════ 启动 ══════════ */
 async function boot() {
   applyTheme(localStorage.getItem(LS.theme) || 'system');
+  setCoverOn(state.coverOn, false);
   updateSortUI();
   setFilter('all');
   try {

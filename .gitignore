@@ -4,6 +4,9 @@ node_modules/
 # 运行期配置：可能含内网地址，不入库
 config.json
 
+# 运行期数据：封面缓存，index.json 含本地磁盘绝对路径，不入库
+data/
+
 # 编辑器 / 系统
 .DS_Store
 .idea/

@@ -17,10 +17,12 @@ import { createReadStream } from 'node:fs';
 import path from 'node:path';
 import os from 'node:os';
 import { fileURLToPath } from 'node:url';
+import { createCovers } from './lib/covers.mjs';
 
 const ROOT = path.dirname(fileURLToPath(import.meta.url));
 const PUBLIC_DIR = path.join(ROOT, 'public');
 const CONFIG_PATH = path.join(ROOT, 'config.json');
+const DATA_DIR = path.join(ROOT, 'data');
 
 const MIME = {
   '.html': 'text/html; charset=utf-8',
@@ -156,6 +158,17 @@ function json(res, status, data) {
   res.end(JSON.stringify(data));
 }
 
+/** 服务端自己访问 qBittorrent（本地回环通常免登录，仍带上 SID 以防万一） */
+async function qbFetch(pathname) {
+  const headers = { referer: config.target + '/', origin: config.target };
+  if (sid) headers.cookie = `SID=${sid}`;
+  const r = await fetch(config.target + pathname, { headers });
+  if (!r.ok) throw new Error(`upstream ${r.status}`);
+  return r.json();
+}
+
+const covers = createCovers({ dataDir: DATA_DIR, qbFetch, onLog: (m) => console.warn(`[cover] ${m}`) });
+
 const server = http.createServer(async (req, res) => {
   const urlPath = req.url || '/';
 
@@ -195,6 +208,11 @@ const server = http.createServer(async (req, res) => {
       } catch { /* 忽略 */ }
       sid = null;
       return json(res, 200, { ok: true });
+    }
+
+    if (urlPath.startsWith('/__cover')) {
+      const handled = await covers.handle(req, res, new URL(urlPath, 'http://localhost'));
+      if (handled) return;
     }
 
     if (urlPath.startsWith('/api/')) {
@@ -238,6 +256,7 @@ function lanAddresses() {
 }
 
 await loadConfig();
+await covers.ready();
 
 if (process.argv.includes('--check')) {
   // 自检：确认上游可用后退出，供脚本使用

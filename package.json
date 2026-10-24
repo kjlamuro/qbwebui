@@ -26,7 +26,7 @@
     "start": "node server.mjs",
     "dev": "node server.mjs",
     "demo": "node tools/demo.mjs",
-    "check": "node --check server.mjs && node --check public/app.js"
+    "check": "node --check server.mjs && node --check lib/covers.mjs && node --check public/app.js"
   },
   "engines": {
     "node": ">=18"

@@ -9,6 +9,8 @@
  */
 
 import http from 'node:http';
+import path from 'node:path';
+import { mkdirSync, writeFileSync, rmSync } from 'node:fs';
 
 const PORT = Number(process.argv[2] || 9899);
 
@@ -268,6 +270,57 @@ const json = (res, data, status = 200) => {
   res.end(JSON.stringify(data));
 };
 
+/* ── 演示封面 ────────────────────────────────────────────
+   设了 MOCK_MEDIA_DIR 就给每个种子造一个真实目录 + 几张 SVG 图，
+   这样 /__cover 的「目录图片兜底」和封面弹窗才有东西可看。      */
+const MEDIA_DIR = process.env.MOCK_MEDIA_DIR || '';
+
+const PALETTES = [
+  ['#3b82f6', '#8b5cf6'], ['#f97316', '#ef4444'], ['#10b981', '#0ea5e9'],
+  ['#f59e0b', '#d946ef'], ['#0ea5e9', '#22d3ee'], ['#84cc16', '#14b8a6'],
+];
+
+function posterSvg(title, sub, i) {
+  const [a, b] = PALETTES[i % PALETTES.length];
+  const dots = Array.from({ length: 26 }, (_, k) => {
+    const x = ((k * 97) % 400) + 10;
+    const y = ((k * 53) % 600) + 10;
+    const r = ((k % 4) + 1) * 1.6;
+    return `<circle cx="${x}" cy="${y}" r="${r}" fill="#fff" opacity="0.16"/>`;
+  }).join('');
+  return `<svg xmlns="http://www.w3.org/2000/svg" width="400" height="600" viewBox="0 0 400 600">
+  <defs>
+    <linearGradient id="g" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0" stop-color="${a}"/><stop offset="1" stop-color="${b}"/>
+    </linearGradient>
+  </defs>
+  <rect width="400" height="600" fill="url(#g)"/>
+  ${dots}
+  <rect x="26" y="26" width="348" height="548" rx="18" fill="none" stroke="#fff" stroke-opacity="0.35" stroke-width="2"/>
+  <text x="200" y="270" text-anchor="middle" font-family="Helvetica, Arial, sans-serif" font-size="30" font-weight="700" fill="#fff">${title}</text>
+  <text x="200" y="308" text-anchor="middle" font-family="Helvetica, Arial, sans-serif" font-size="17" fill="#fff" fill-opacity="0.86">${sub}</text>
+  <text x="200" y="560" text-anchor="middle" font-family="Helvetica, Arial, sans-serif" font-size="13" fill="#fff" fill-opacity="0.6">qBWebUI demo artwork</text>
+</svg>`;
+}
+
+function buildMedia() {
+  rmSync(MEDIA_DIR, { recursive: true, force: true });
+  mkdirSync(MEDIA_DIR, { recursive: true });
+  torrents.forEach((t, i) => {
+    const slug = t.name.replace(/[^a-zA-Z0-9]+/g, '-').replace(/^-|-$/g, '').slice(0, 42).toLowerCase();
+    const dir = path.join(MEDIA_DIR, `${String(i + 1).padStart(2, '0')}-${slug}`);
+    mkdirSync(path.join(dir, 'extras'), { recursive: true });
+    writeFileSync(path.join(dir, 'poster.svg'), posterSvg(t.name.slice(0, 26), t.category || 'demo', i));
+    writeFileSync(path.join(dir, 'fanart.svg'), posterSvg(`${t.name.slice(0, 20)} · wide`, 'fanart', i + 2));
+    writeFileSync(path.join(dir, 'extras', 'scene-01.svg'), posterSvg('Scene 01', t.category || 'demo', i + 3));
+    writeFileSync(path.join(dir, 'extras', 'scene-02.svg'), posterSvg('Scene 02', t.category || 'demo', i + 4));
+    t.content_path = dir;
+    t.save_path = path.dirname(dir);
+  });
+}
+
+if (MEDIA_DIR) buildMedia();
+
 const server = http.createServer((req, res) => {
   const url = new URL(req.url || '/', 'http://placeholder');
   const p = url.pathname;
@@ -315,4 +368,5 @@ const server = http.createServer((req, res) => {
 
 server.listen(PORT, '127.0.0.1', () => {
   console.log(`[mock-qb] 假 qBittorrent 已启动: http://127.0.0.1:${PORT} (${torrents.length} 个虚构种子)`);
+  if (MEDIA_DIR) console.log(`[mock-qb] 演示封面目录：${MEDIA_DIR}`);
 });

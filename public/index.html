@@ -61,6 +61,11 @@
   <symbol id="i-lock" viewBox="0 0 24 24"><rect x="4.5" y="10" width="15" height="10" rx="2.5"/><path d="M8 10V7.5a4 4 0 0 1 8 0V10"/></symbol>
   <symbol id="i-eye" viewBox="0 0 24 24"><path d="M2.5 12S6 5.5 12 5.5 21.5 12 21.5 12 18 18.5 12 18.5 2.5 12 2.5 12z"/><circle cx="12" cy="12" r="3"/></symbol>
   <symbol id="i-inbox" viewBox="0 0 24 24"><path d="M3.5 13.5 6.5 5h11l3 8.5V18a2.5 2.5 0 0 1-2.5 2.5h-12A2.5 2.5 0 0 1 3.5 18z"/><path d="M3.5 13.5h4l1 2.2h7l1-2.2h4"/></symbol>
+  <symbol id="i-film" viewBox="0 0 24 24"><rect x="3.2" y="4.5" width="17.6" height="15" rx="2.6"/><path d="M3.2 9h17.6M3.2 15h17.6M7.6 4.5v15M16.4 4.5v15"/></symbol>
+  <symbol id="i-music" viewBox="0 0 24 24"><path d="M9 18V6.2l9-1.7V16"/><circle cx="6.5" cy="18" r="2.6"/><circle cx="15.5" cy="16" r="2.6"/></symbol>
+  <symbol id="i-image" viewBox="0 0 24 24"><rect x="3.2" y="4.8" width="17.6" height="14.4" rx="2.6"/><circle cx="8.6" cy="9.8" r="1.7"/><path d="m4.6 17.4 5-5 3.3 3.3 2.7-2.7 3.8 3.8"/></symbol>
+  <symbol id="i-archive" viewBox="0 0 24 24"><path d="M3.5 7.5h17v11a2 2 0 0 1-2 2h-13a2 2 0 0 1-2-2z"/><path d="M3 4h18v3.5H3zM10.2 11.5h3.6"/></symbol>
+  <symbol id="i-photo" viewBox="0 0 24 24"><rect x="3" y="4.5" width="18" height="15" rx="3"/><path d="m4.5 16.5 4.8-4.8 3.2 3.2 2.6-2.6 4.4 4.4"/><circle cx="8.4" cy="9.2" r="1.6"/></symbol>
 </svg>
 
 <div class="app" id="app">
@@ -148,6 +153,7 @@
 
       <div class="top-actions">
         <button class="icon-btn" id="altSpeedBtn" title="备用速度限制"><svg><use href="#i-speed"/></svg></button>
+        <button class="icon-btn is-on" id="thumbBtn" title="显示 / 隐藏缩略图" aria-pressed="true"><svg><use href="#i-photo"/></svg></button>
         <button class="icon-btn" id="themeBtn" title="切换主题"><svg><use href="#i-sun"/></svg></button>
         <button class="icon-btn" id="settingsBtn" title="设置"><svg><use href="#i-settings"/></svg></button>
         <button class="btn btn-primary only-desktop" id="addBtn"><svg><use href="#i-plus"/></svg>添加种子</button>
@@ -279,6 +285,21 @@
         </label>
         <label class="field"><span>标签</span><input id="addTags" type="text" placeholder="用逗号分隔，例如：电影, 4K" /></label>
       </div>
+      <div class="field">
+        <span>封面缩略图<em class="field-hint" id="addCoverHint">可选</em></span>
+        <div class="cover-pick">
+          <div class="cover-pick-box" id="addCoverBox"><svg><use href="#i-image"/></svg></div>
+          <div class="cover-pick-main">
+            <b>不设置也可以</b>
+            <small>默认使用种子目录里的图片，没有就显示类型图标，添加后也能随时更换</small>
+            <div class="cover-pick-actions">
+              <button class="btn btn-soft btn-sm" id="addCoverBtn" type="button"><svg><use href="#i-upload"/></svg>选择图片</button>
+              <button class="btn btn-ghost btn-sm" id="addCoverClear" type="button" hidden>移除</button>
+            </div>
+          </div>
+          <input type="file" id="addCoverFile" accept="image/*" hidden />
+        </div>
+      </div>
       <div class="check-group">
         <label class="check-line"><input type="checkbox" id="addPaused" /><span class="checkbox"></span>添加后暂停</label>
         <label class="check-line"><input type="checkbox" id="addSeq" /><span class="checkbox"></span>顺序下载</label>
@@ -287,6 +308,36 @@
     <div class="modal-foot">
       <button class="btn btn-ghost" data-close="addModal">取消</button>
       <button class="btn btn-primary" id="addSubmit">开始下载</button>
+    </div>
+  </div>
+</div>
+
+<!-- ══════════ 封面 ══════════ -->
+<div class="modal" id="coverModal" hidden>
+  <div class="modal-card cover-card">
+    <div class="modal-head">
+      <h2>封面</h2>
+      <button class="icon-btn" data-close="coverModal"><svg><use href="#i-x"/></svg></button>
+    </div>
+    <div class="modal-body">
+      <div class="cover-top">
+        <div class="cover-big" id="coverBig"><svg><use href="#i-image"/></svg></div>
+        <div class="cover-top-info">
+          <p class="cover-name" id="coverName">—</p>
+          <p class="hint" id="coverMode">—</p>
+          <div class="cover-acts">
+            <button class="btn btn-soft btn-sm" id="coverUpload"><svg><use href="#i-upload"/></svg>上传</button>
+            <button class="btn btn-soft btn-sm" id="coverIcon"><svg><use href="#i-image"/></svg>用图标</button>
+            <button class="btn btn-ghost btn-sm" id="coverAuto"><svg><use href="#i-refresh"/></svg>自动</button>
+          </div>
+        </div>
+        <input type="file" id="coverFile" accept="image/*" hidden />
+      </div>
+      <div class="cover-sec">
+        <span>目录中的图片<em id="coverDir"></em></span>
+        <small id="coverCount"></small>
+      </div>
+      <div class="cover-grid" id="coverGrid"></div>
     </div>
   </div>
 </div>
@@ -327,6 +378,9 @@
           <label class="field"><span>刷新频率</span>
             <select id="setInterval"><option value="1000">1 秒</option><option value="2000">2 秒</option><option value="5000">5 秒</option><option value="0">手动</option></select>
           </label>
+        </div>
+        <div class="check-group">
+          <label class="check-line"><input type="checkbox" id="setThumbs" /><span class="checkbox"></span>在列表中显示封面缩略图</label>
         </div>
       </div>
 
