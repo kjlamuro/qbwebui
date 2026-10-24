@@ -2651,6 +2651,8 @@ let addTvdbBusy = false;
 let addScrapeSeq = 0; // 每发起一次刮削 +1，回来的旧结果直接丢掉
 
 function resetAddCover() {
+  // 清空的瞬间把还在飞的刮削也作废，否则「移除」之后旧结果回来又把海报贴上了
+  addScrapeSeq++;
   addCoverFile = null;
   addTvdb = null;
   if (addCoverUrl) URL.revokeObjectURL(addCoverUrl);
@@ -2665,6 +2667,7 @@ function resetAddCover() {
   $('#addScrapeLabel').textContent = '刮削封面';
   $('#addArts').hidden = true;
   $('#addArts').innerHTML = '';
+  clearAddKwHint();
   const input = $('#addCoverFile');
   if (input) input.value = '';
 }
@@ -2690,15 +2693,57 @@ function addNameGuess() {
  * 关键词：默认填种子文件名（magnet 取 dn），但它是**可编辑**的——
  * 种子名里带一堆发布组 / 压制参数时，用户改成「Obsession」这种干净片名往往一次就中。
  * addKwAuto 记住上次自动填的值，用来判断用户是不是真改过；改回自动值就继续跟着走。
+ *
+ * 和详情页一样先把文件名解析成片名（剥掉 1080p / x264 / 制作组 / S01E02），
+ * 解析结果在 addParsed 里存着：关键词跟着变干净，发请求时还能把年份 / 影视类型带上，
+ * 不然「The.Matrix.1999」被剥成「The Matrix」之后再猜年份就猜不出来了。
  */
 let addKwAuto = '';
 let addKwDirty = false;
+let addParsed = null;   // 文件名解析结果 { title, year, season, isSeries }
+let addParseSeq = 0;    // 每解析一次 +1，回来的旧结果直接丢掉
+let addParse$ = null;   // 当前解析请求，刮削前等它，别拿脏名先搜一遍
 
 function syncAddKeyword(force = false) {
-  const guess = addNameGuess();
-  addKwAuto = guess;
+  const raw = addNameGuess();
+  addKwAuto = raw;
+  addParsed = null;
   if (force) addKwDirty = false;
-  if (!addKwDirty) $('#addKw').value = guess;
+  if (!addKwDirty) $('#addKw').value = raw;
+  clearAddKwHint();
+  addParse$ = raw ? parseAddName(raw) : null;
+}
+
+/** 把文件名丢给服务端解析成干净片名：纯本地计算，不联网、不耗 TVDB 额度 */
+async function parseAddName(raw) {
+  const my = ++addParseSeq;
+  let parsed = null;
+  try {
+    const res = await fetch(`/__cover/tvdb/parse?name=${encodeURIComponent(raw)}`);
+    const data = await res.json().catch(() => ({}));
+    if (res.ok) parsed = data.parsed || null;
+  } catch { /* 解析不出来就用原名去搜，服务端 match 里还会再解析一次 */ }
+  if (my !== addParseSeq) return; // 期间换了文件 / 又粘了别的链接
+  // 本来就叫这个（Sintel、三体…）就不用折腾，别让用户以为名字被改了
+  if (!parsed?.title || parsed.title === raw) return;
+  addParsed = parsed;
+  if (!addKwDirty) {
+    addKwAuto = parsed.title;
+    $('#addKw').value = parsed.title;
+    const hint = $('#addKwHint');
+    if (hint) {
+      const ep = parsed.season ? ` 第${parsed.season}季` : '';
+      hint.innerHTML = `已从文件名识别为 <b>${esc(parsed.title)}</b>${esc(parsed.year ? ` ${parsed.year}` : '')}${esc(ep)}，不对可以直接改`;
+      hint.hidden = false;
+    }
+  }
+}
+
+function clearAddKwHint() {
+  const hint = $('#addKwHint');
+  if (!hint) return;
+  hint.hidden = true;
+  hint.textContent = '';
 }
 
 function addKeyword() {
@@ -2707,6 +2752,7 @@ function addKeyword() {
 
 $('#addKw').addEventListener('input', () => {
   addKwDirty = $('#addKw').value.trim() !== addKwAuto;
+  if (addKwDirty) clearAddKwHint(); // 用户自己动了关键词，就别再念叨解析结果
 });
 $('#addKw').addEventListener('keydown', (e) => {
   if (e.key !== 'Enter') return;
@@ -2744,6 +2790,10 @@ async function scrapeAddCover({ auto = false } = {}) {
   if (auto && addCoverFile) return; // 已经手动选了图，别覆盖
   // 设置里选「仅手动」时，选文件 / 粘链接不自动联网，把主动权留给「刮削封面」按钮
   if (auto && state.tvdb.auto !== 'new') return;
+  // 等文件名解析回来再搜：解析是纯本地计算（毫秒级），但关键词、年份、影视类型都靠它，
+  // 抢在这之前发请求等于又按脏名搜一遍
+  if (addParse$) { try { await addParse$; } catch { /* 解析失败就用原名 */ } }
+  if (auto && addCoverFile) return;
   const name = addKeyword();
   if (!name) {
     if (!auto) toast(addMode === 'link' ? '先粘贴 magnet 或链接，或直接填个关键词' : '先选择 .torrent 文件，或直接填个关键词', 'err');
@@ -2761,7 +2811,13 @@ async function scrapeAddCover({ auto = false } = {}) {
   $('#addScrapeLabel').textContent = '刮削中…';
   $('#addCoverHint').textContent = `搜索「${name}」…`;
   try {
-    const res = await fetch(`/__cover/tvdb/match?name=${encodeURIComponent(name)}`);
+    const qs = new URLSearchParams({ name });
+    // 关键词还是解析出来那个时，把年份 / 类型一起带上——名字洗干净的同时别把 1999、S02 这些信息弄丢
+    if (addParsed && !addKwDirty && name === addParsed.title) {
+      if (addParsed.year) qs.set('year', addParsed.year);
+      if (typeof addParsed.isSeries === 'boolean') qs.set('type', addParsed.isSeries ? 'series' : 'movie');
+    }
+    const res = await fetch(`/__cover/tvdb/match?${qs}`);
     const data = await res.json().catch(() => ({}));
     if (my !== addScrapeSeq) return; // 期间又搜了一次，这次结果作废
     if (addCoverFile) return; // 刮削期间用户改用手动选图了
