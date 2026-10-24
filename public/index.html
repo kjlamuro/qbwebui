@@ -13,7 +13,7 @@
 <link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'><rect width='32' height='32' rx='9' fill='%236c8cff'/><path d='M16 8v12m0 0l-4.5-4.5M16 20l4.5-4.5M9 24h14' stroke='white' stroke-width='2.4' stroke-linecap='round' stroke-linejoin='round' fill='none'/></svg>" />
 <!-- ?v= 是资源版本号：改 styles.css / app.js 必须同步改这里，iOS PWA 的 Service Worker
      更新不可靠，靠 URL 变化强制绕过旧缓存。sw.js 的 SHELL 列表也要同步。 -->
-<link rel="stylesheet" href="styles.css?v=20261024al" />
+<link rel="stylesheet" href="styles.css?v=20261024ao" />
 <link rel="manifest" href="manifest.webmanifest" />
 <link rel="apple-touch-icon" href="icon-180.png" />
 <meta name="apple-mobile-web-app-title" content="qBWebUI" />
@@ -365,10 +365,12 @@
           <div class="cover-pick-box" id="addCoverBox"><svg><use href="#i-image"/></svg></div>
           <div class="cover-pick-main">
             <b id="addCoverTitle">不设置也可以</b>
-            <small id="addCoverDesc">默认用种子目录里的图片，没有就显示类型图标；也可以粘贴一张（桌面 ⌘/Ctrl+V，手机点「粘贴」）</small>
+            <small id="addCoverDesc">默认用种子目录里的图片，没有就显示类型图标；也可以在下面直接粘一张</small>
             <div class="cover-pick-actions">
               <button class="btn btn-ghost btn-sm" id="addCoverBtn" type="button" title="选择图片，或直接 ⌘/Ctrl+V 粘贴"><svg><use href="#i-upload"/></svg>选择图片</button>
-              <button class="btn btn-ghost btn-sm" id="addPasteBtn" type="button" title="从剪贴板粘贴一张图"><svg><use href="#i-paste"/></svg>粘贴</button>
+              <div class="paste-input paste-input--inline" id="addPasteInput" contenteditable="true" role="textbox" inputmode="none"
+                aria-label="粘贴封面图片" title="长按这里粘贴，桌面也可以直接 ⌘/Ctrl+V"
+                data-placeholder="长按这里粘贴图片"></div>
               <button class="btn btn-ghost btn-sm" id="addCoverClear" type="button" hidden>移除</button>
             </div>
           </div>
@@ -409,11 +411,12 @@
           <p class="hint" id="coverKind"></p>
           <div class="cover-acts">
             <button class="btn btn-soft btn-sm" id="coverUpload" title="选择图片，或直接 ⌘/Ctrl+V 粘贴"><svg><use href="#i-upload"/></svg>上传</button>
-            <button class="btn btn-soft btn-sm" id="coverPaste" title="从剪贴板粘贴一张图（手机先复制图片）"><svg><use href="#i-paste"/></svg>粘贴</button>
             <button class="btn btn-soft btn-sm" id="coverIcon"><svg><use href="#i-image"/></svg>用图标</button>
             <button class="btn btn-ghost btn-sm" id="coverAuto"><svg><use href="#i-refresh"/></svg>自动</button>
+            <div class="paste-input paste-input--inline" id="coverPasteInput" contenteditable="true" role="textbox" inputmode="none"
+              aria-label="粘贴封面图片" title="长按这里粘贴，桌面也可以直接 ⌘/Ctrl+V"
+              data-placeholder="长按粘贴图片"></div>
           </div>
-          <p class="hint cover-paste-hint">桌面直接 <kbd>⌘</kbd>/<kbd>Ctrl</kbd> + <kbd>V</kbd>；手机先复制图片，再点「粘贴」</p>
         </div>
         <input type="file" id="coverFile" accept="image/*" hidden />
       </div>
@@ -440,24 +443,6 @@
       </div>
       <div class="cover-grid" id="tvdbGrid"></div>
       <p class="hint tvdb-attr">Metadata provided by <a href="https://www.thetvdb.com" target="_blank" rel="noreferrer">TheTVDB</a> · 海报版权归各自权利人，仅限个人本地使用</p>
-    </div>
-  </div>
-</div>
-
-<!-- ══════════ 粘贴图片 ══════════ -->
-<div class="modal" id="pasteModal" hidden>
-  <div class="modal-card paste-card">
-    <div class="modal-head">
-      <h2>粘贴图片</h2>
-      <button class="icon-btn" data-close="pasteModal"><svg><use href="#i-x"/></svg></button>
-    </div>
-    <div class="modal-body">
-      <div class="paste-zone" id="pasteZone" contenteditable="true" role="textbox" aria-multiline="true"
-        aria-label="长按这里粘贴图片" data-placeholder="长按这里，选「粘贴」"></div>
-      <p class="hint">手机系统不允许网页直接读剪贴板，所以借这个输入框：长按 → 「粘贴」，图一出现就自动用上。桌面直接 ⌘/Ctrl+V，也可以把图片拖进来。</p>
-    </div>
-    <div class="modal-foot">
-      <button class="btn btn-ghost" data-close="pasteModal">取消</button>
     </div>
   </div>
 </div>
@@ -644,6 +629,6 @@
 
 <div class="toasts" id="toasts"></div>
 
-<script type="module" src="app.js?v=20261024al"></script>
+<script type="module" src="app.js?v=20261024ao"></script>
 </body>
 </html>

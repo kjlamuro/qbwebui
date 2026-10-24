@@ -2130,9 +2130,10 @@ async function tvdbAutoMatch({ silent = false } = {}) {
     // 没把握就别硬套，把候选摆出来让用户自己点
     renderTvdbCandidates(r.items || []);
     const named = r.parsed?.title ? `「${r.parsed.title}」` : '';
+    const namedFrom = r.nameFrom === 'file' ? '（按种子里的正片文件名）' : '';
     tvdbSetHint(r.items?.length
-      ? `识别为${named}，不敢确定是哪一部，挑一个吧`
-      : `TheTVDB 上没找到${named}，换个关键词试试（中英混排的名字可以只填英文）`);
+      ? `识别为${named}${namedFrom}，不敢确定是哪一部，挑一个吧`
+      : `TheTVDB 上没找到${named}${namedFrom}，换个关键词试试（中英混排的名字可以只填英文）`);
     return false;
   } catch (err) {
     tvdbSetHint('匹配失败');
@@ -2190,7 +2191,8 @@ async function loadTvdbPanel(hash) {
       $('#coverTvdbName').textContent = '';
       tvdbSetHint(st.mode === 'custom' ? '当前是自定义图片，想换成刮削海报点「自动匹配」' : '当前用的是类型图标，想换海报点「自动匹配」');
     } else {
-      tvdbSetHint(st.parsed?.title ? `识别为「${st.parsed.title}」${st.parsed.year ? ` ${st.parsed.year}` : ''}，正在自动匹配…` : '—');
+      const fromLabel = st.nameFrom === 'file' ? '（按种子里的正片文件名）' : '';
+      tvdbSetHint(st.parsed?.title ? `识别为「${st.parsed.title}」${st.parsed.year ? ` ${st.parsed.year}` : ''}${fromLabel}，正在自动匹配…` : '—');
       // 还没刮过的种子：打开就把自动匹配跑掉，命中直接套第一张海报，不命中才留候选给人挑
       tvdbAutoMatch({ silent: true });
     }
@@ -2205,7 +2207,6 @@ function openModal(id) {
   document.body.dataset.modal = id;
 }
 function closeModal(id) {
-  if (id === 'pasteModal') { closePasteSheet(); return; } // 粘贴面板要顺带还原本来的弹窗
   const el = document.getElementById(id);
   if (!el) return;
   el.hidden = true;
@@ -2594,9 +2595,45 @@ $('#addSeg').addEventListener('click', (e) => {
   applyAddMode(item.dataset.seg);
 });
 
+/**
+ * 文件名截断：种子名经常又长又多语言，原样铺进拖拽框会把框撑破、把按钮顶走。
+ * 中间省略而不是结尾省略——开头是片名，结尾是 .torrent 后缀，两头都是有效信息。
+ * 完整名字挂在 title 上，鼠标悬停还能看全。
+ */
+function shortName(name, max = 40) {
+  const s = String(name || '');
+  if (s.length <= max) return s;
+  const tail = Math.min(12, Math.floor(max / 3)); // 留住后缀 + 少量结尾
+  return `${s.slice(0, max - tail - 1)}…${s.slice(-tail)}`;
+}
+
+/** 已选文件的提示文案：多选只报第一个名字，个数由前缀说明，全名留在 title 里 */
+function dropHintOf(files) {
+  if (!files.length) return '点击选择或拖入 .torrent 文件'; // 取消选择也要回到初始态
+  // 多选时再压短一点，免得「已选择 N 个文件：」加名字之后尾巴孤零零折一行
+  const first = shortName(files[0].name, files.length > 1 ? 30 : 40);
+  return `已选择 ${files.length} 个文件：${first}`;
+}
+
+/** 把已选文件写进拖拽框：文案截断，title 里放全名 */
+function renderDropText(files) {
+  const el = $('#dropText');
+  el.textContent = dropHintOf(files);
+  el.title = files.length ? files.map((f) => f.name).join('\n') : '';
+}
+
+/** 封面那行的说明文字：短标签清掉旧 title，长文件名才挂全名 */
+function setCoverHint(text, title = '') {
+  const el = $('#addCoverHint');
+  if (!el) return;
+  el.textContent = text;
+  if (title) el.title = title;
+  else el.removeAttribute('title');
+}
+
 $('#addFile').addEventListener('change', (e) => {
   addFiles = Array.from(e.target.files || []);
-  $('#dropText').textContent = addFiles.length ? `已选择 ${addFiles.length} 个文件：${addFiles.map((f) => f.name).join('、')}` : '点击选择或拖入 .torrent 文件';
+  renderDropText(addFiles);
   syncAddKeyword(true);
   // 有种子名就顺手刮一次海报，用户什么都不用点
   if (addFiles.length) scrapeAddCover({ auto: true });
@@ -2609,7 +2646,7 @@ dz.addEventListener('drop', (e) => {
   const files = Array.from(e.dataTransfer.files || []).filter((f) => f.name.endsWith('.torrent'));
   if (files.length) {
     addFiles = files;
-    $('#dropText').textContent = `已选择 ${files.length} 个文件：${files.map((f) => f.name).join('、')}`;
+    renderDropText(addFiles);
     syncAddKeyword(true);
     scrapeAddCover({ auto: true });
   }
@@ -2661,9 +2698,9 @@ function resetAddCover() {
   box.classList.remove('has-img');
   box.innerHTML = '<svg><use href="#i-image"/></svg>';
   $('#addCoverClear').hidden = true;
-  $('#addCoverHint').textContent = '可选';
+  setCoverHint('可选');
   $('#addCoverTitle').textContent = '不设置也可以';
-  $('#addCoverDesc').textContent = '默认用种子目录里的图片，没有就显示类型图标；也可以粘贴一张（桌面 ⌘/Ctrl+V，手机点「粘贴」）';
+  $('#addCoverDesc').textContent = '默认用种子目录里的图片，没有就显示类型图标；也可以在下面直接粘一张';
   $('#addScrapeLabel').textContent = '刮削封面';
   $('#addArts').hidden = true;
   $('#addArts').innerHTML = '';
@@ -2700,43 +2737,85 @@ function addNameGuess() {
  */
 let addKwAuto = '';
 let addKwDirty = false;
-let addParsed = null;   // 文件名解析结果 { title, year, season, isSeries }
-let addParseSeq = 0;    // 每解析一次 +1，回来的旧结果直接丢掉
-let addParse$ = null;   // 当前解析请求，刮削前等它，别拿脏名先搜一遍
+let addParsed = null;    // 解析结果 { title, year, season, isSeries }
+let addNameFrom = '';    // 'file' = 种子里的正片文件名；'torrent' = 种子名兜底
+let addParseSeq = 0;     // 每解析一次 +1，回来的旧结果直接丢掉
+let addParse$ = null;    // 当前解析请求，刮削前等它，别拿脏名先搜一遍
+let addTorrentSeen = null; // 上次解过的 .torrent，同一份文件别重复上传
 
 function syncAddKeyword(force = false) {
   const raw = addNameGuess();
   addKwAuto = raw;
   addParsed = null;
+  addNameFrom = '';
   if (force) addKwDirty = false;
   if (!addKwDirty) $('#addKw').value = raw;
   clearAddKwHint();
-  addParse$ = raw ? parseAddName(raw) : null;
+  addParse$ = raw || addFiles[0] ? resolveAddName(raw) : null;
 }
 
-/** 把文件名丢给服务端解析成干净片名：纯本地计算，不联网、不耗 TVDB 额度 */
-async function parseAddName(raw) {
+/**
+ * 关键词该取哪个名字，按可靠程度排：
+ *   1. .torrent 里的正片文件名 —— 发布名是发布组堆出来的，正片文件名通常干净得多
+ *   2. 种子名（magnet 的 dn / .torrent 的文件名）—— 拿不到文件清单时兜底
+ * 两条都走服务端同一套 parseTitle，剥掉 1080p / x264 / 制作组 / S01E02 这些噪音。
+ */
+async function resolveAddName(raw) {
   const my = ++addParseSeq;
-  let parsed = null;
+  let got = null;
   try {
-    const res = await fetch(`/__cover/tvdb/parse?name=${encodeURIComponent(raw)}`);
-    const data = await res.json().catch(() => ({}));
-    if (res.ok) parsed = data.parsed || null;
-  } catch { /* 解析不出来就用原名去搜，服务端 match 里还会再解析一次 */ }
+    if (addMode !== 'link' && addFiles[0]) got = await torrentInnerName(addFiles[0]);
+    if (!got?.name && raw) got = await parseSeedName(raw);
+  } catch { /* 两条路都不通就用原名，服务端 match 里还会再解析一次 */ }
   if (my !== addParseSeq) return; // 期间换了文件 / 又粘了别的链接
-  // 本来就叫这个（Sintel、三体…）就不用折腾，别让用户以为名字被改了
-  if (!parsed?.title || parsed.title === raw) return;
-  addParsed = parsed;
+  const title = got?.parsed?.title || '';
+  if (!title) return;
+  addParsed = got.parsed;
+  addNameFrom = got.from || '';
   if (!addKwDirty) {
-    addKwAuto = parsed.title;
-    $('#addKw').value = parsed.title;
-    const hint = $('#addKwHint');
-    if (hint) {
-      const ep = parsed.season ? ` 第${parsed.season}季` : '';
-      hint.innerHTML = `已从文件名识别为 <b>${esc(parsed.title)}</b>${esc(parsed.year ? ` ${parsed.year}` : '')}${esc(ep)}，不对可以直接改`;
-      hint.hidden = false;
-    }
+    addKwAuto = title;
+    $('#addKw').value = title;
   }
+  // 名字没变、又没有年份这类额外信息，就别唠叨
+  const worthTelling = got.from === 'file' ? title !== raw || Boolean(got.parsed.year) : title !== raw;
+  if (worthTelling) renderAddKwHint(got);
+}
+
+/** 还没添加的 .torrent 里有什么文件：交给服务端解 bencode，同一份文件不重复上传 */
+async function torrentInnerName(file) {
+  const key = `${file.name}:${file.size}:${file.lastModified}`;
+  if (addTorrentSeen?.key === key) return addTorrentSeen.res;
+  const res = await fetch('/__cover/tvdb/torrent', { method: 'POST', body: file });
+  const data = await res.json().catch(() => ({}));
+  const out = res.ok && data?.name ? data : null;
+  addTorrentSeen = { key, res: out };
+  return out;
+}
+
+/** 兜底：把种子名丢给服务端解析（纯本地计算，不联网、不耗额度） */
+async function parseSeedName(raw) {
+  const res = await fetch(`/__cover/tvdb/parse?name=${encodeURIComponent(raw)}`);
+  const data = await res.json().catch(() => ({}));
+  if (!res.ok || !data?.parsed?.title) return null;
+  return { name: raw, from: 'torrent', parsed: data.parsed };
+}
+
+function renderAddKwHint(got) {
+  const hint = $('#addKwHint');
+  if (!hint) return;
+  const p = got.parsed || {};
+  const extra = `${p.year ? ` ${p.year}` : ''}${p.season ? ` 第${p.season}季` : ''}`;
+  const title = `<b>${esc(p.title)}</b>${esc(extra)}`;
+  hint.innerHTML = got.from === 'file'
+    ? `按种子里的 <b>${esc(clipLabel(got.name, 34))}</b> 认作 ${title}，不对可以直接改`
+    : `已从种子名识别为 ${title}，不对可以直接改`;
+  hint.hidden = false;
+}
+
+/** 名字太长就截一段，够认出是哪个文件就行 */
+function clipLabel(s, n) {
+  const t = String(s || '');
+  return t.length > n ? `${t.slice(0, n - 1)}…` : t;
 }
 
 function clearAddKwHint() {
@@ -2809,7 +2888,7 @@ async function scrapeAddCover({ auto = false } = {}) {
   const btn = $('#addScrapeBtn');
   btn.classList.add('is-busy');
   $('#addScrapeLabel').textContent = '刮削中…';
-  $('#addCoverHint').textContent = `搜索「${name}」…`;
+  setCoverHint(`搜索「${shortName(name, 24)}」…`, name);
   try {
     const qs = new URLSearchParams({ name });
     // 关键词还是解析出来那个时，把年份 / 类型一起带上——名字洗干净的同时别把 1999、S02 这些信息弄丢
@@ -2823,7 +2902,7 @@ async function scrapeAddCover({ auto = false } = {}) {
     if (addCoverFile) return; // 刮削期间用户改用手动选图了
     if (!res.ok) throw new Error(data.message || '刮削失败');
     if (!data.ok) {
-      $('#addCoverHint').textContent = '没匹配到';
+      setCoverHint('没匹配到');
       if (!auto) {
         toast(data.reason === 'low-score'
           ? '没把握是哪一部，把关键词改得更准一点再试，也可以点「选择图片」手动设'
@@ -2843,12 +2922,12 @@ async function scrapeAddCover({ auto = false } = {}) {
     renderAddArts(arts, image);
     $('#addCoverTitle').textContent = `《${pick.name}》${pick.year ? ` (${pick.year})` : ''}`;
     $('#addCoverDesc').textContent = '来自 TheTVDB，添加后自动套用；想换一张点下面任意一张';
-    $('#addCoverHint').textContent = pick.type === 'movie' ? '电影' : '剧集';
+    setCoverHint(pick.type === 'movie' ? '电影' : '剧集');
     $('#addCoverClear').hidden = false;
     toast(`已匹配《${pick.name}》，添加后自动套用海报`, 'ok');
   } catch (err) {
     if (my !== addScrapeSeq) return;
-    $('#addCoverHint').textContent = '刮削失败';
+    setCoverHint('刮削失败');
     if (!auto) toast(err.message, 'err');
   } finally {
     if (my === addScrapeSeq) {
@@ -2889,7 +2968,7 @@ function setAddCoverFile(file) {
   box.innerHTML = `<img src="${addCoverUrl}" alt="" />`;
   box.classList.add('has-img');
   $('#addCoverClear').hidden = false;
-  $('#addCoverHint').textContent = file.name || '已粘贴的图片';
+  setCoverHint(shortName(file.name, 24) || '已粘贴的图片', file.name || '');
   $('#addCoverTitle').textContent = '自定义图片';
   $('#addCoverDesc').textContent = '添加后按这张设置；想换回刮削的海报点「刮削封面」';
   $('#addArts').hidden = true;
@@ -2922,7 +3001,8 @@ function isTypingTarget(node) {
   return check(node) || check(document.activeElement);
 }
 
-// ⌘/Ctrl+V 直接贴一张图当封面：封面弹窗立刻落盘；添加弹窗先预览，添加成功后落盘
+// ⌘/Ctrl+V 直接贴一张图当封面：封面弹窗立刻落盘；添加弹窗先预览，添加成功后落盘；
+// 开着详情面板时也认，省得为了换个封面再点进「封面•刮削」
 document.addEventListener('paste', async (e) => {
   if (isTypingTarget(e.target)) return;
   const file = clipboardImage(e);
@@ -2933,31 +3013,27 @@ document.addEventListener('paste', async (e) => {
     if (ok) toast('已粘贴封面', 'ok');
     return;
   }
+  if ($('#detail').classList.contains('is-open') && state.detailHash) {
+    e.preventDefault();
+    const hash = state.detailHash;
+    const ok = await uploadCoverFile(hash, file, true); // 提示统一走下面这句
+    if (ok) {
+      // 详情面板不会因为封面变了整块重画，直接把 hero 里的图换掉（load 事件会补 has-img）
+      const img = document.querySelector('#detail .d-cover img');
+      if (img) img.src = coverUrl(hash);
+      toast('已粘贴封面', 'ok');
+    }
+    return;
+  }
   if (!$('#addModal').hidden) {
     e.preventDefault();
     if (setAddCoverFile(file)) toast('已粘贴封面，添加后自动套用', 'ok');
   }
 });
 
-/* ── 移动端粘贴：系统不让网页读剪贴板，借一个 contenteditable 走「粘贴」菜单 ── */
-let pasteKind = 'cover'; // 'cover' | 'add'
-let pasteBack = '';      // 面板关掉后该回到哪个弹窗
-
-/** 先试 Clipboard API：Android Chrome / 桌面支持，iOS Safari 基本不给读图 */
-async function readClipboardImage() {
-  if (!navigator.clipboard?.read) return null;
-  try {
-    const items = await navigator.clipboard.read();
-    for (const item of items) {
-      const type = (item.types || []).find((t) => /^image\//.test(t));
-      if (!type) continue;
-      const blob = await item.getType(type);
-      const ext = (type.split('/')[1] || 'png').replace('jpeg', 'jpg');
-      return new File([blob], `clipboard.${ext}`, { type });
-    }
-  } catch { /* 没授权 / 不支持读图片，退回粘贴面板 */ }
-  return null;
-}
+/* ── 内联粘贴框：手机长按走系统「粘贴」菜单，桌面直接 Ctrl+V，也可以把图拖进去 ── */
+// 系统不让网页直接读图片剪贴板（iOS 基本必拒），所以借 contenteditable 让系统自己弹「粘贴」；
+// 两个弹窗里各有一个这样的框，粘上来立刻生效，不再「点按钮 → 再进一个面板」。
 
 /** 有些浏览器粘贴过来的是 <img src="data:|blob:">，把地址上的图捞回来 */
 async function fileFromSrc(src) {
@@ -2972,75 +3048,57 @@ async function fileFromSrc(src) {
   } catch { return null; }
 }
 
-function openPasteSheet(kind) {
-  pasteKind = kind;
-  pasteBack = kind === 'add' ? 'addModal' : 'coverModal';
-  const zone = $('#pasteZone');
-  zone.innerHTML = '';
-  openModal('pasteModal');
-  // 桌面聚焦方便直接 Ctrl+V；手机上聚焦会弹键盘挡住面板，交给长按
-  if (!window.matchMedia('(pointer: coarse)').matches) setTimeout(() => zone.focus(), 120);
-}
+function bindPasteBox(el, apply) {
+  if (!el) return;
+  const take = (file) => {
+    if (!file) return false;
+    el.innerHTML = ''; // 图取走后清空，占位文字回来
+    apply(file);
+    return true;
+  };
 
-function closePasteSheet() {
-  $('#pasteZone').innerHTML = '';
-  $('#pasteModal').hidden = true;
-  if (pasteBack && !$('#' + pasteBack).hidden) document.body.dataset.modal = pasteBack;
-  else delete document.body.dataset.modal;
-}
+  el.addEventListener('paste', async (e) => {
+    const file = clipboardImage(e);
+    if (file) { e.preventDefault(); take(file); return; }
+    // iOS 有时只给 text/html，里面是 <img src="blob:|data:">
+    const html = e.clipboardData?.getData('text/html') || '';
+    const src = /<img[^>]+src\s*=\s*["']([^"']+)["']/i.exec(html)?.[1];
+    const fromHtml = await fileFromSrc(src);
+    if (fromHtml) { e.preventDefault(); take(fromHtml); return; }
+    // 都没拿到就别拦，让系统把图插进框里，下面的 input 事件接着处理
+  });
 
-function applyPastedImage(file) {
-  if (!file) return;
-  if (pasteKind === 'add') {
-    if (setAddCoverFile(file)) {
-      closePasteSheet();
-      toast('已粘贴封面，添加后自动套用', 'ok');
+  // 系统插进来的图 → 取走用掉；有人往里打字 → 直接清掉（这个框只收图）
+  el.addEventListener('input', async () => {
+    const img = el.querySelector('img');
+    if (img) {
+      const src = img.currentSrc || img.src;
+      el.innerHTML = '<span class="paste-busy">正在读取图片…</span>';
+      const file = await fileFromSrc(src);
+      if (!take(file)) el.innerHTML = '';
+      return;
     }
-    return;
-  }
-  closePasteSheet();
-  if (!coverHash) return;
+    if ((el.textContent || '').trim()) el.innerHTML = '';
+  });
+
+  el.addEventListener('dragover', (e) => { e.preventDefault(); el.classList.add('is-over'); });
+  el.addEventListener('dragleave', () => el.classList.remove('is-over'));
+  el.addEventListener('drop', (e) => {
+    e.preventDefault();
+    el.classList.remove('is-over');
+    take(Array.from(e.dataTransfer?.files || []).find((f) => /^image\//.test(f.type)));
+  });
+  // 离开时把残留内容清掉，免得下次粘的图插到旧位置
+  el.addEventListener('blur', () => { if (!el.querySelector('img')) el.innerHTML = ''; });
+}
+
+bindPasteBox($('#coverPasteInput'), (file) => {
+  if (!coverHash) { toast('先选中一个种子', 'err'); return; }
   uploadCoverFile(coverHash, file).then((ok) => { if (ok) toast('已粘贴封面', 'ok'); });
-}
-
-/** 点「粘贴」：手机上先试读剪贴板（Android 能读），读不到就开长按粘贴的框；
-    桌面不弹权限申请，直接开框让用户 Ctrl+V */
-async function pasteFromClipboard(kind) {
-  if (window.matchMedia('(pointer: coarse)').matches) {
-    const file = await readClipboardImage();
-    if (file) { pasteKind = kind; applyPastedImage(file); return; }
-  }
-  openPasteSheet(kind);
-}
-
-const pasteZone = $('#pasteZone');
-pasteZone.addEventListener('paste', async (e) => {
-  const file = clipboardImage(e);
-  if (file) { e.preventDefault(); applyPastedImage(file); return; }
-  // iOS 有时只给 text/html，里面是 <img src="blob:|data:">
-  const html = e.clipboardData?.getData('text/html') || '';
-  const src = /<img[^>]+src\s*=\s*["']([^"']+)["']/i.exec(html)?.[1];
-  const fromHtml = await fileFromSrc(src);
-  if (fromHtml) { e.preventDefault(); applyPastedImage(fromHtml); }
-  // 都没拿到就别拦，让系统把图插进框里，下面的 input 事件接着处理
 });
-pasteZone.addEventListener('input', async () => {
-  const img = pasteZone.querySelector('img');
-  if (!img) return;
-  const file = await fileFromSrc(img.currentSrc || img.src);
-  if (file) applyPastedImage(file);
+bindPasteBox($('#addPasteInput'), (file) => {
+  if (setAddCoverFile(file)) toast('已粘贴封面，添加后自动套用', 'ok');
 });
-pasteZone.addEventListener('dragover', (e) => { e.preventDefault(); pasteZone.classList.add('is-over'); });
-pasteZone.addEventListener('dragleave', () => pasteZone.classList.remove('is-over'));
-pasteZone.addEventListener('drop', async (e) => {
-  e.preventDefault();
-  pasteZone.classList.remove('is-over');
-  const file = Array.from(e.dataTransfer?.files || []).find((f) => /^image\//.test(f.type));
-  if (file) applyPastedImage(file);
-});
-
-$('#coverPaste').addEventListener('click', () => pasteFromClipboard('cover'));
-$('#addPasteBtn').addEventListener('click', () => pasteFromClipboard('add'));
 
 $('#addCoverClear').addEventListener('click', resetAddCover);
 
@@ -3083,7 +3141,7 @@ $('#addSubmit').addEventListener('click', async () => {
     $('#addUrls').value = '';
     $('#addTags').value = '';
     addFiles = [];
-    $('#dropText').textContent = '点击选择或拖入 .torrent 文件';
+    renderDropText(addFiles);
     toast('已添加到下载队列', 'ok');
     refreshNow();
     // 新种子一出现就把类型写进缓存（后台跑，不挡界面）；带封面时顺便等它拿到新 hash
