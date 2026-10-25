@@ -3,8 +3,9 @@
  * 生成 README 截图：无头 Chrome 打开演示实例，按脚本点几下再截图。
  *
  *   npm run demo            # 另开一个终端（http://127.0.0.1:7799）
- *   npm run shots           # 截图写进 docs/
- *   npm run shots -- --only cover --url http://127.0.0.1:7788
+ *   npm run shots           # 中文界面截图，写进 docs/
+ *   npm run shots:en        # 英文界面截图，写进 docs/en/（README.en.md 用这套）
+ *   npm run shots -- --only cover --url http://127.0.0.1:7788 --lang en
  *
  * 零依赖：浏览器控制走 Chrome DevTools Protocol，通过 Node 22 内置的 WebSocket。
  * 用 macOS 的 sips 顺手压一下宽度（没有就保持原图）。
@@ -12,7 +13,7 @@
 
 import { spawn, spawnSync } from 'node:child_process';
 import { existsSync } from 'node:fs';
-import { mkdtemp, rm, writeFile } from 'node:fs/promises';
+import { mkdir, mkdtemp, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -30,6 +31,9 @@ const arg = (name, fallback = '') => {
 };
 const BASE = arg('url', process.env.SHOT_URL || 'http://127.0.0.1:7799').replace(/\/$/, '');
 const ONLY = arg('only');
+/* 界面语言：zh 写 docs/，en 写 docs/en/，两套截图各自配一份 README */
+const LANG = arg('lang', process.env.SHOT_LANG || 'zh') === 'en' ? 'en' : 'zh';
+const OUTDIR = LANG === 'en' ? path.join(DOCS, 'en') : DOCS;
 
 /* ── CDP 小客户端 ─────────────────────────────────────── */
 
@@ -207,6 +211,16 @@ function makePage(browser) {
       await this.waitFor("document.querySelectorAll('.row').length > 0", { label: '列表渲染' });
       await this.settle(600);
     },
+    /* 切界面语言：写 localStorage 后重载一次，和 theme() 一个套路 */
+    async lang(mode) {
+      const now = await evaluate("return localStorage.getItem('qb.lang') || '';");
+      if (now === mode) return;
+      await evaluate(`localStorage.setItem('qb.lang', ${JSON.stringify(mode)});`);
+      await evaluate('location.reload(); return true;');
+      await sleep(400);
+      await this.waitFor("document.querySelectorAll('.row').length > 0", { label: '列表渲染' });
+      await this.settle(600);
+    },
     async settle(ms = 700) {
       // 等缩略图解码完成，避免截到一半的图
       await evaluate(`return Promise.all(
@@ -226,7 +240,7 @@ function makePage(browser) {
       const { data } = await cdp.send('Page.captureScreenshot', {
         format: 'jpeg', quality: 90, captureBeyondViewport: false,
       }, sessionId);
-      const out = path.join(DOCS, file);
+      const out = path.join(OUTDIR, file);
       await writeFile(out, Buffer.from(data, 'base64'));
       if (width) {
         spawnSync('sips', ['--resampleWidth', String(width), out], { stdio: 'ignore' });
@@ -308,13 +322,14 @@ const SHOTS = [
         if (!row) throw new Error('列表里没有 Big Buck Bunny');
         row.querySelector('.thumb').click(); return true;`);
       await page.waitFor("!document.querySelector('#coverModal').hidden", { label: '封面弹窗' });
-      // 搜索 → 点第一张候选 → 展开它的全部海报
+      // 搜索 → 点第一条候选 → 右边出简介（左列表 / 右简介两栏）
+      await page.waitFor("!document.querySelector('#tvdbSearch').disabled", { label: '刮削区就绪' });
       await page.click('#tvdbSearch');
-      await page.waitFor("document.querySelector('#tvdbGrid .tvdb-item[data-id]')", { timeout: 25000, label: 'TVDB 候选' });
-      await page.click('#tvdbGrid .tvdb-item[data-id]');
-      await page.waitFor("document.querySelectorAll('#tvdbGrid .tvdb-item[data-image]').length >= 2", { timeout: 25000, label: 'TVDB 海报' });
-      // 海报行在最下面，稍微把弹窗内容滚到底，别让最后一行被裁掉
-      await page.evaluate("document.querySelector('#tvdbGrid').scrollIntoView({ block: 'end' }); return true;");
+      await page.waitFor("document.querySelector('#tvdbList .tvdb-row')", { timeout: 25000, label: 'TVDB 候选' });
+      await page.click('#tvdbList .tvdb-row');
+      await page.waitFor("!document.querySelector('#tvdbSide').hidden && document.querySelector('#tvdbSide img')", { timeout: 25000, label: 'TVDB 简介' });
+      // 两栏在最下面，滚到底别让简介被裁掉
+      await page.evaluate("document.querySelector('#tvdbSplit').scrollIntoView({ block: 'end' }); return true;");
       await page.settle(1200);
     },
   },
@@ -346,8 +361,10 @@ const main = async () => {
   if (!probe?.ok) throw new Error(`打不开 ${BASE}，先跑 npm run demo`);
 
   const chrome = findChrome();
+  await mkdir(OUTDIR, { recursive: true });
   console.log(`Chrome  ${chrome}`);
-  console.log(`目标    ${BASE}\n`);
+  console.log(`目标    ${BASE}`);
+  console.log(`语言    ${LANG}  →  ${path.relative(ROOT, OUTDIR)}/\n`);
 
   const browser = await launch(chrome);
   const page = makePage(browser);
@@ -360,6 +377,7 @@ const main = async () => {
       await page.goto(`${BASE}/?shot=${Date.now()}`);
       await page.waitFor(shot.ready, { label: shot.file });
       await page.theme(shot.theme);
+      await page.lang(LANG);
       // 缩略图和类型图标是异步问服务端要的，等它们落地再截
       await page.waitSoft("document.querySelectorAll('.thumb.has-img').length >= 4", 9000);
       await page.settle(900);

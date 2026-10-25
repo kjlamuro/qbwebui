@@ -18,6 +18,7 @@ import path from 'node:path';
 import os from 'node:os';
 import { fileURLToPath } from 'node:url';
 import { createCovers } from './lib/covers.mjs';
+import { createSpeedLog } from './lib/speedlog.mjs';
 
 const ROOT = path.dirname(fileURLToPath(import.meta.url));
 const PUBLIC_DIR = path.join(ROOT, 'public');
@@ -229,6 +230,18 @@ async function qbFetch(pathname) {
 
 const covers = createCovers({ dataDir: DATA_DIR, qbFetch, onLog: (m) => console.warn(`[cover] ${m}`) });
 
+/* 速度采样：即使没人打开页面也一直记，历史和峰值才不会从「打开这一刻」才开始 */
+const speedlog = createSpeedLog({
+  dataDir: DATA_DIR,
+  interval: Number(process.env.QBWEBUI_SAMPLE_MS) || 5000,
+  // 会话过期时先按记住的凭据续一次，续不上就等下轮（用户登录后自动恢复）
+  qbFetch: async (p) => {
+    if (!sid) await ensureSid();
+    return qbFetch(p);
+  },
+  onLog: (m) => console.warn(`[speed] ${m}`),
+});
+
 const server = http.createServer(async (req, res) => {
   const urlPath = req.url || '/';
 
@@ -240,23 +253,6 @@ const server = http.createServer(async (req, res) => {
         port: config.port,
         lan: lanAddresses(),
       });
-    }
-
-    if (urlPath.startsWith('/__config') && req.method === 'POST') {
-      const body = JSON.parse((await readBody(req)).toString('utf8') || '{}');
-      if (typeof body.target === 'string' && body.target.trim()) {
-        const next = body.target.trim().replace(/\/+$/, '');
-        try {
-          const probe = new URL(next);
-          if (!/^https?:$/.test(probe.protocol)) throw new Error('protocol');
-        } catch {
-          return json(res, 400, { error: 'bad-url', message: '请输入完整的 http(s)://地址' });
-        }
-        if (next !== config.target) sid = null;
-        config.target = next;
-        await saveConfig();
-      }
-      return json(res, 200, { target: config.target });
     }
 
     if (urlPath.startsWith('/__auth') && req.method === 'POST') {
@@ -296,6 +292,16 @@ const server = http.createServer(async (req, res) => {
     if (urlPath.startsWith('/__cover')) {
       const handled = await covers.handle(req, res, new URL(urlPath, 'http://localhost'));
       if (handled) return;
+    }
+
+    // 速度历史 / 单种子峰值（只读，给侧边栏、概览和详情页用）
+    if (urlPath.startsWith('/__speed')) {
+      const u = new URL(urlPath, 'http://localhost');
+      if (u.pathname.startsWith('/__speed/peak')) {
+        return json(res, 200, { peak: speedlog.peakOf(u.searchParams.get('hash')) });
+      }
+      const win = Number(u.searchParams.get('window')) || 300;
+      return json(res, 200, speedlog.history(win));
     }
 
     if (urlPath.startsWith('/api/')) {
@@ -340,6 +346,7 @@ function lanAddresses() {
 
 await loadConfig();
 await covers.ready();
+await speedlog.ready();
 
 if (process.argv.includes('--check')) {
   // 自检：确认上游可用后退出，供脚本使用
@@ -355,6 +362,7 @@ if (process.argv.includes('--check')) {
 
 server.listen(config.port, '0.0.0.0', () => {
   const lan = lanAddresses();
+  speedlog.start();
   console.log('');
   console.log('  qBWebUI 已启动');
   console.log(`  本机   http://127.0.0.1:${config.port}`);

@@ -2,6 +2,16 @@
    qBWebUI · 前端逻辑
    ══════════════════════════════════════════════════════════ */
 
+/* ?v= 与 index.html / sw.js 的版本号保持一致：URL 变了才会绕过 iOS PWA 的旧缓存 */
+// 注意：翻译函数故意导入成 tr，不是 t —— 代码里 t 是「种子对象」的惯用局部变量名
+// （createRow(t) / updateRow(el, t) / renderDetail 里的 const t = state.map.get(hash)），
+// 若叫 t 会被这些局部变量遮蔽，点到详情面板就 TypeError: t is not a function。
+import { t as tr, getLang, setLang, onLangChange, localeTag, applyDom, bootI18n } from './i18n.js?v=20261025set2';
+
+/* 先把静态文案铺成目标语言，再往下跑业务逻辑 —— head 里的内联脚本已经把 body 藏住了，
+   这一步在同一次任务里完成，所以不会看到中文闪一下再变英文。 */
+bootI18n();
+
 const $ = (sel, root = document) => root.querySelector(sel);
 const $$ = (sel, root = document) => Array.from(root.querySelectorAll(sel));
 const isMobile = () => window.matchMedia('(max-width: 900px)').matches;
@@ -40,6 +50,8 @@ const state = {
   pollMs: Number(localStorage.getItem(LS.interval) ?? 2000),
   connected: false,
   firstLoad: true,
+  limit: 150,        // 增量渲染：当前最多渲染多少行，滚到底再追加
+  visibleTotal: 0,   // 当前筛选条件下的总条数（含还没渲染的）
   prefs: null,
   loggedIn: false,
   pending: new Map(), // 乐观状态覆盖，避免轮询回弹造成的闪烁
@@ -80,6 +92,11 @@ function fmtEta(sec) {
   const d = Math.floor(sec / 86400);
   const h = Math.floor((sec % 86400) / 3600);
   const m = Math.floor((sec % 3600) / 60);
+  if (getLang() === 'en') {
+    if (d > 0) return `${d}d ${h}h`;
+    if (h > 0) return `${h}h ${m}m`;
+    return `${m}m`;
+  }
   if (d > 0) return `${d}天${h}时`;
   if (h > 0) return `${h}时${m}分`;
   return `${m}分`;
@@ -99,6 +116,11 @@ function fmtDuration(sec) {
   const d = Math.floor(sec / 86400);
   const h = Math.floor((sec % 86400) / 3600);
   const m = Math.floor((sec % 3600) / 60);
+  if (getLang() === 'en') {
+    if (d > 0) return `${d}d ${h}h`;
+    if (h > 0) return `${h}h ${m}m`;
+    return `${m}m`;
+  }
   if (d > 0) return `${d} 天 ${h} 小时`;
   if (h > 0) return `${h} 小时 ${m} 分`;
   return `${m} 分钟`;
@@ -108,6 +130,9 @@ const pct = (v) => `${(Math.min(1, Math.max(0, v)) * 100).toFixed(1)}%`;
 
 const esc = (s) =>
   String(s ?? '').replace(/[&<>"']/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
+
+/** 作品名：中文用书名号，英文用弯引号（英文界面里《》很突兀） */
+const titled = (s) => (!s ? '' : getLang() === 'en' ? `“${s}”` : `《${s}》`);
 
 /* ── 种子状态映射 ─────────────────────────────────────── */
 const STATE_MAP = {
@@ -134,7 +159,10 @@ const STATE_MAP = {
   unknown: { key: 'stall', label: '未知' },
 };
 
-const statusOf = (t) => STATE_MAP[t.state] || { key: 'stall', label: t.state || '未知' };
+const statusOf = (x) => {
+  const s = STATE_MAP[x.state] || { key: 'stall', label: x.state || '未知' };
+  return { key: s.key, label: tr(s.label) };
+};
 const isPaused = (t) => /paused|stopped/i.test(t.state);
 const isComplete = (t) => t.progress >= 0.9999;
 
@@ -177,6 +205,13 @@ async function apiJson(path, opts) {
   try { return JSON.parse(text); } catch { return text; }
 }
 
+/** 本服务自己的端点（/__*），不经过 qBittorrent 代理，所以不能走 api() */
+async function localJson(path) {
+  const res = await fetch(path, { credentials: 'same-origin' });
+  if (!res.ok) throw new Error(`HTTP ${res.status}`);
+  return res.json();
+}
+
 const post = (path, data) => {
   const body = data instanceof FormData ? data : new URLSearchParams(data || {});
   return api(path, { method: 'POST', body });
@@ -216,6 +251,15 @@ async function setPaused(hashes, paused) {
 /* ══════════ 渲染：列表 ══════════ */
 const rowsEl = $('#rows');
 const rowCache = new Map();
+const listScrollEl = $('.list-scroll');
+
+/* 增量渲染：一次只把前 PAGE 行挂进 DOM，滚到接近底部再追加下一页。
+   之前试过 content-visibility:auto —— 它把视口外的行整块跳过，省了开销，
+   但代价是滚动时新行得现算现画，肉眼能看到一行行冒出来（再加预热缓冲也不行：
+   只是把开销挪前，帧耗时反而更高）。改成限量渲染后，滚动区里的行全是已布局好的，
+   滚动不会触发「边滚边画」，而 DOM 规模也压下来了。 */
+const PAGE = Number(localStorage.getItem('qb.page') || 150);
+state.limit = PAGE;
 
 /* ══════════ 封面缩略图 ══════════ */
 /* 解析顺序：自定义上传图 → 种子目录里自动找到的图 → 类型图标（兜底） */
@@ -413,7 +457,7 @@ function visibleTorrents() {
   list.sort((a, b) => {
     const va = get(a);
     const vb = get(b);
-    if (typeof va === 'string') return va.localeCompare(vb, 'zh-CN') * dir;
+    if (typeof va === 'string') return va.localeCompare(vb, localeTag()) * dir;
     if (va === vb) return a.name.localeCompare(b.name) * dir;
     return (va - vb) * dir;
   });
@@ -427,7 +471,7 @@ function createRow(t) {
   el.innerHTML = `
     <div class="cell check"><label class="check-wrap"><input type="checkbox" /><span class="checkbox"></span></label></div>
     <div class="cell name">
-      <div class="thumb" data-act="cover" title="封面•刮削"><img alt="" loading="lazy" decoding="async" /><svg><use href="#i-inbox"/></svg></div>
+      <div class="thumb" data-act="cover" title="封面•刮削" data-i18n-title="html.cover.title"><img alt="" loading="lazy" decoding="async" /><svg><use href="#i-inbox"/></svg></div>
       <div class="t-text"><div class="t-name"></div><span class="t-media" hidden></span><div class="t-sub"></div></div>
     </div>
     <div class="cell size"></div>
@@ -438,7 +482,7 @@ function createRow(t) {
     <div class="cell eta"></div>
     <div class="cell state"><span class="pill"><i></i><span class="pl"></span></span></div>
     <div class="cell meta"></div>
-    <div class="cell actions"><button class="icon-btn" data-act="menu" aria-label="操作"><svg><use href="#i-more"/></svg></button></div>
+    <div class="cell actions"><button class="icon-btn" data-act="menu" aria-label="操作" data-i18n-aria="html.col.actions"><svg><use href="#i-more"/></svg></button></div>
   `;
   const refs = {
     check: $('input', el),
@@ -462,6 +506,7 @@ function createRow(t) {
   };
   el._refs = refs;
   el._v = {};
+  applyDom(el); // 行模板里那几处静态 title / aria-label
   refs.thumbImg.addEventListener('load', () => refs.thumb.classList.add('has-img'));
   refs.thumbImg.addEventListener('error', () => refs.thumb.classList.remove('has-img'));
   return el;
@@ -543,7 +588,7 @@ function updateRow(el, t) {
   if (v.dl !== t.dlspeed) { r.dl.textContent = fmtSpeed(t.dlspeed); v.dl = t.dlspeed; }
   if (v.up !== t.upspeed) { r.up.textContent = fmtSpeed(t.upspeed); v.up = t.upspeed; }
   if (v.ratio !== t.ratio) { r.ratio.textContent = t.ratio > 0 ? t.ratio.toFixed(2) : '—'; v.ratio = t.ratio; }
-  const etaTxt = isComplete(t) ? '已完成' : fmtEta(t.eta);
+  const etaTxt = isComplete(t) ? '—' : fmtEta(t.eta);
   if (v.eta !== etaTxt) { r.eta.textContent = etaTxt; v.eta = etaTxt; }
 
   if (v.state !== t.state) {
@@ -555,7 +600,7 @@ function updateRow(el, t) {
   const barCls = `pbar ${st.key === 'dl' ? 'dl' : st.key === 'seed' ? 'seed' : st.key === 'pause' ? 'pause' : st.key === 'err' ? 'err' : isComplete(t) ? 'done' : ''}`;
   if (v.barCls !== barCls) { r.pbar.className = barCls; v.barCls = barCls; }
 
-  const metaTxt = `${fmtBytes(t.size)} · ↓ ${t.dlspeed > 0 ? fmtBytes(t.dlspeed) + '/s' : '0'} · ↑ ${t.upspeed > 0 ? fmtBytes(t.upspeed) + '/s' : '0'} · ${isComplete(t) ? '分享率 ' + (t.ratio || 0).toFixed(2) : '剩 ' + fmtEta(t.eta)}`;
+  const metaTxt = `${fmtBytes(t.size)} · ↓ ${t.dlspeed > 0 ? fmtBytes(t.dlspeed) + '/s' : '0'} · ↑ ${t.upspeed > 0 ? fmtBytes(t.upspeed) + '/s' : '0'} · ${isComplete(t) ? tr('分享率 {v}', { v: (t.ratio || 0).toFixed(2) }) : tr('剩 {eta}', { eta: fmtEta(t.eta) })}`;
   if (v.meta !== metaTxt) { r.meta.textContent = metaTxt; v.meta = metaTxt; }
 
   const sel = state.selected.has(t.hash);
@@ -563,7 +608,10 @@ function updateRow(el, t) {
 }
 
 function renderRows() {
-  const list = visibleTorrents();
+  const full = visibleTorrents();
+  state.visibleTotal = full.length;
+  // 一次只渲染前 state.limit 行，剩下的等滚到接近底部再追加
+  const list = state.limit < full.length ? full.slice(0, state.limit) : full;
   const seen = new Set();
 
   list.forEach((t, i) => {
@@ -576,14 +624,35 @@ function renderRows() {
     } else {
       updateRow(el, t);
     }
-    el.style.order = i;
-    el.style.display = '';
+    /* order / display 原来每轮无条件重写一遍：900 行就是 1800 次样式写入，
+       值根本没变，却把整棵树的样式标脏了（实测闲置时 RecalcStyle 能到 1s/8s）。
+       记在节点上，变了才写。 */
+    if (el._order !== i) { el.style.order = i; el._order = i; }
+    if (el._off) { el.style.display = ''; el._off = false; }
     seen.add(t.hash);
   });
 
   // 隐藏不再可见的行（保留节点，切换筛选无闪烁）
   for (const [hash, el] of rowCache) {
-    if (!seen.has(hash)) el.style.display = 'none';
+    if (!seen.has(hash) && !el._off) { el.style.display = 'none'; el._off = true; }
+  }
+
+  /* 保留节点只是为了切筛选不闪，已经不在 qB 里的种子必须回收：以前只把行设成
+     display:none，节点和几个封面 Map 都不删，删种子删得越多内存越高，页面挂着
+     不动也会一直涨。以 state.map 为准 —— 它在的只是被筛掉了，不在的才是真没了。 */
+  if (rowCache.size > state.map.size) {
+    for (const [hash, el] of rowCache) {
+      if (state.map.has(hash)) continue;
+      el.remove();
+      rowCache.delete(hash);
+      state.coverKind.delete(hash);
+      state.coverFlag.delete(hash);
+      state.coverAsked.delete(hash);
+      state.coverV.delete(hash);
+      state.coverMode.delete(hash);
+      state.kindAsked.delete(hash);
+      state.mediaTitles.delete(hash);
+    }
   }
 
   const isEmpty = list.length === 0;
@@ -591,12 +660,32 @@ function renderRows() {
   $('#skeletonView').hidden = !state.firstLoad;
   if (isEmpty && !state.firstLoad) {
     const searching = state.q || state.category || state.tag || state.filter !== 'all';
-    $('#emptyTitle').textContent = searching ? '没有匹配的种子' : '这里还没有种子';
-    $('#emptyDesc').textContent = searching ? '试试换个关键词或筛选条件' : '点击右上角「添加种子」开始下载';
+    $('#emptyTitle').textContent = searching ? tr('没有匹配的种子') : tr('这里还没有种子');
+    $('#emptyDesc').textContent = searching ? tr('试试换个关键词或筛选条件') : tr('点击右上角「添加种子」开始下载');
     $('#emptyAddBtn').style.display = searching ? 'none' : '';
   }
 
   renderCounts();
+}
+
+/* 增量渲染的追加：快滚到底时再加载一页。
+   600px 的提前量按「两三屏之前的空闲帧」留的，别等到真贴底才开始建节点。 */
+let pagingLock = 0;
+listScrollEl.addEventListener('scroll', () => {
+  if (Date.now() < pagingLock) return;
+  if (state.limit >= state.visibleTotal) return;
+  const rest = listScrollEl.scrollHeight - listScrollEl.scrollTop - listScrollEl.clientHeight;
+  if (rest < 600) { state.limit += PAGE; renderRows(); }
+}, { passive: true });
+
+/** 筛选 / 搜索 / 排序变了，回到第一页——不然改个关键词还停在「已加载 600 行」上 */
+function resetPaging() {
+  state.limit = PAGE;
+  /* 必须同时回到顶部：内容一变短，浏览器会把 scrollTop 夹到新的底部，
+     紧接着的 scroll 事件立刻判定「接近底部」，一瞬间连翻好几页，等于没重置。
+     回到顶部的滚动动画期间也先锁住追加。 */
+  pagingLock = Date.now() + 350;
+  try { listScrollEl.scrollTo({ top: 0, behavior: 'instant' }); } catch { listScrollEl.scrollTop = 0; }
 }
 
 function renderCounts() {
@@ -620,12 +709,12 @@ function renderCounts() {
   }
   const catList = $('#catList');
   const allCats = new Set([...Object.keys(catCounts), ...Object.keys(state.categories || {})]);
-  const cats = [...allCats].sort((a, b) => a.localeCompare(b, 'zh-CN'));
+  const cats = [...allCats].sort((a, b) => a.localeCompare(b, localeTag()));
   const sig = cats.map((c) => c + (catCounts[c] || 0)).join('|') + `#${state.category}`;
   if (catList._sig !== sig) {
     catList._sig = sig;
     catList.innerHTML =
-      `<div class="side-row ${state.category === '__none__' ? 'is-active' : ''}" data-cat="__none__"><svg><use href="#i-inbox"/></svg><span class="side-row-name">未分类</span><em>${state.list.filter((t) => !t.category).length}</em></div>` +
+      `<div class="side-row ${state.category === '__none__' ? 'is-active' : ''}" data-cat="__none__"><svg><use href="#i-inbox"/></svg><span class="side-row-name">${esc(tr('未分类'))}</span><em>${state.list.filter((t) => !t.category).length}</em></div>` +
       cats.map((c) => `<div class="side-row ${state.category === c ? 'is-active' : ''}" data-cat="${esc(c)}"><svg><use href="#i-folder"/></svg><span class="side-row-name">${esc(c)}</span><em>${catCounts[c] || 0}</em></div>`).join('');
   }
 
@@ -636,14 +725,14 @@ function renderCounts() {
       tagCounts[tag] = (tagCounts[tag] || 0) + 1;
     });
   }
-  const tags = Object.keys(tagCounts).sort((a, b) => a.localeCompare(b, 'zh-CN'));
+  const tags = Object.keys(tagCounts).sort((a, b) => a.localeCompare(b, localeTag()));
   const tagSig = tags.map((c) => c + tagCounts[c]).join('|') + `#${state.tag}`;
   const tagEl = $('#tagList');
   if (tagEl._sig !== tagSig) {
     tagEl._sig = tagSig;
     tagEl.innerHTML = tags.length
       ? tags.map((tag) => `<span class="tag-chip ${state.tag === tag ? 'is-active' : ''}" data-tag="${esc(tag)}"><span>${esc(tag)}</span></span>`).join('')
-      : '<span class="hint">暂无标签</span>';
+      : `<span class="hint">${esc(tr('暂无标签'))}</span>`;
   }
 
   // 移动端 chips
@@ -651,7 +740,7 @@ function renderCounts() {
   const chipSig = FILTERS.map((f) => counts[f.id]).join(',') + `#${state.filter}`;
   if (chips._sig !== chipSig) {
     chips._sig = chipSig;
-    chips.innerHTML = FILTERS.map((f) => `<button class="chip ${state.filter === f.id ? 'is-active' : ''}" data-chip="${f.id}">${f.label}<b>${counts[f.id]}</b></button>`).join('');
+    chips.innerHTML = FILTERS.map((f) => `<button class="chip ${state.filter === f.id ? 'is-active' : ''}" data-chip="${f.id}">${esc(tr(f.label))}<b>${counts[f.id]}</b></button>`).join('');
   }
 
   // 批量条
@@ -676,18 +765,191 @@ function renderServer() {
   const usedRatio = totalSize + free > 0 ? totalSize / (totalSize + free) : 0;
   $('#sideFree').textContent = fmtBytes(free);
   $('#sideFreeBar').style.width = `${Math.min(100, usedRatio * 100).toFixed(1)}%`;
-  $('#sideFreeBar').parentElement.title = `种子占用 ${fmtBytes(totalSize)} · 剩余 ${fmtBytes(free)}`;
+  $('#sideFreeBar').parentElement.title = tr('种子占用 {size} · 剩余 {free}', { size: fmtBytes(totalSize), free: fmtBytes(free) });
 
   const alt = Boolean(s.use_alt_speed_limits);
   $('#altSpeedBtn').classList.toggle('is-on', alt);
-  $('#altSpeedBtn').title = alt ? '备用速度限制：已开启' : '备用速度限制：已关闭';
+  $('#altSpeedBtn').title = alt ? tr('备用速度限制：已开启') : tr('备用速度限制：已关闭');
 
   const online = s.connection_status === 'connected' || s.connection_status === 'firewalled';
   const conn = $('#connText');
   conn.textContent = online
-    ? s.connection_status === 'firewalled' ? '已连接 · 防火墙中' : '已连接'
-    : s.connection_status === 'disconnected' ? '未连接' : '连接中…';
+    ? s.connection_status === 'firewalled' ? tr('已连接 · 防火墙中') : tr('已连接')
+    : s.connection_status === 'disconnected' ? tr('未连接') : tr('连接中…');
   conn.className = online ? 'is-online' : 'is-offline';
+}
+
+/* ══════════ 速度折线（侧边栏 / 概览共用） ══════════ */
+/* 数据来自服务端常驻采样（/__speed），所以刷新页面、重启服务端都不会从 0 开始。
+   这里只负责把它画成一条线：按时间轴铺满整个窗口，采样没铺满时线条从右侧长出来。 */
+const SPARK_WINDOW = 300;
+const SPARK = { data: null, at: 0, busy: false };
+
+/** 点集 → 若干段 path。中断（服务端重启 / 采样断档）就另起一段，别拉一条假直线连过去 */
+function sparkSegments(points, from, to, pick, top, h, gapMs) {
+  const span = Math.max(1, to - from);
+  const segs = [];
+  let cur = null;
+  let prevT = 0;
+  for (const p of points) {
+    const x = ((p[0] - from) / span) * 100;
+    const y = h - (Math.min(p[pick], top) / top) * (h - 2) - 1;
+    const piece = `${x.toFixed(1)},${y.toFixed(1)}`;
+    if (!cur || p[0] - prevT > gapMs) {
+      cur = { d: `M${piece}`, x0: x.toFixed(1), x1: x.toFixed(1) };
+      segs.push(cur);
+    } else {
+      cur.d += `L${piece}`;
+      cur.x1 = x.toFixed(1);
+    }
+    prevT = p[0];
+  }
+  return segs;
+}
+
+/**
+ * 服务端采样（5 秒一个点） + 一个「此刻」的实时点。
+ * 服务端的点最多落后 5 秒，而界面每 2 秒就拿到了当前速度——不把这一笔接上去，
+ * 曲线右端永远停在几秒前，看起来就是一条静止的线。
+ */
+function sparkFeed() {
+  const d = SPARK.data;
+  if (!d) return null;
+  const stale = !!d.stale;
+  // 断连时可能连一个点都没有，但状态得传下去，否则前端只会说「采样中」
+  if (!Array.isArray(d.points) || !d.points.length) {
+    return stale ? { points: [], stale, live: { dl: 0, up: 0 } } : null;
+  }
+  const s = state.server || {};
+  const live = { dl: Math.max(0, s.dl_info_speed || 0), up: Math.max(0, s.up_info_speed || 0) };
+  const now = Date.now();
+  const last = d.points[d.points.length - 1];
+  const gap = Math.max(12000, (d.interval || 5000) * 1.8);
+  // 断档太久就别硬接一条假线（服务端刚重启时会出现）
+  const ok = now - last[0] <= gap;
+  const points = ok ? [...d.points, [now, live.dl, live.up]] : d.points;
+  const to = Math.max(now, points[points.length - 1][0]);
+  // 数据还没攒满窗口（服务端刚重启 / 刚装上）时，横轴就用现有跨度铺满，
+  // 否则曲线会缩在最右边一条缝里，看着像「没有数据」
+  const from = Math.max(to - SPARK_WINDOW * 1000, points[0][0]);
+  return { points, from, to, max: d.max, interval: d.interval, live, ok, stale };
+}
+
+/** 横轴实际覆盖多久——别在只采了 30 秒的时候硬说「近 5 分钟」 */
+function sparkRangeText(feed) {
+  if (feed?.stale) return ''; // 断连时横轴范围没意义，别硬算出一个假数字
+  if (!feed || !Number.isFinite(feed.from) || !Number.isFinite(feed.to)) return tr('近 5 分钟');
+  const sec = Math.max(1, Math.round((feed.to - feed.from) / 1000));
+  if (sec >= 90) return tr('近 {n} 分钟', { n: Math.round(sec / 60) });
+  return tr('近 {n} 秒', { n: sec });
+}
+
+/**
+ * 纵轴量程取窗口内的 95 分位，而不是绝对最大值。
+ * 一次异常尖峰（qB 偶尔会报出离谱的瞬时值）就能把整条曲线压到底部，
+ * 看着跟没有数据一样——峰值数字仍旧显示真峰值，只是不让它决定量程。
+ */
+function sparkScale(feed) {
+  const vals = [];
+  for (const p of feed.points) vals.push(p[1], p[2]);
+  vals.sort((a, b) => a - b);
+  const q = vals.length ? vals[Math.min(vals.length - 1, Math.floor(vals.length * 0.95))] : 0;
+  return Math.max(1, Math.max(q, feed.live?.dl || 0, feed.live?.up || 0) * 1.12);
+}
+
+/** 整窗口真的一点流量都没有（qB 空闲 / 只在做种）——折线和峰值文字都不该装作有数据 */
+function sparkIdle(feed) {
+  if (!feed || !Array.isArray(feed.points) || feed.points.length < 2) return false;
+  const live = feed.live || { dl: 0, up: 0 };
+  return !(live.dl > 0 || live.up > 0 || feed.points.some((p) => p[1] > 0 || p[2] > 0));
+}
+
+function sparkSvg(feed) {
+  const points = feed && Array.isArray(feed.points) ? feed.points : [];
+  // 一次都没连上时才用空态替代；已经连过、攒了点的，曲线照画（外层会调暗），
+  // 别把历史一把抹掉——那才是真正有用的信息
+  if (feed?.stale && points.length < 2) return `<div class="spark-empty">${esc(tr('已断连'))}</div>`;
+  if (points.length < 2) return `<div class="spark-empty">${esc(tr('采样中…'))}</div>`;
+  /* 采到了，但整窗口一点流量都没有。这时候老老实实画，就是一条贴着底边的直线——
+     看起来跟「坏了」没区别，所以直接说明「无流量」，别让人对着一个空盒子猜。 */
+  if (sparkIdle(feed)) return `<div class="spark-empty">${esc(tr('无流量'))}</div>`;
+  const H = 30;
+  const from = feed.from ?? points[0][0];
+  const to = feed.to ?? points[points.length - 1][0];
+  const gap = Math.max(15000, (feed.interval || 5000) * 3);
+  // 两条线共用量程，才看得出上下行谁更占带宽
+  const top = sparkScale(feed);
+  const dl = sparkSegments(points, from, to, 1, top, H, gap);
+  const up = sparkSegments(points, from, to, 2, top, H, gap);
+  const line = (segs) => segs.map((s) => s.d).join(' ');
+  // 面积只补在每一段自己下面，断档处不会糊成一块
+  const area = dl.length === 1
+    ? `${dl[0].d} L${dl[0].x1},${H} L${dl[0].x0},${H} Z`
+    : '';
+  // 右端一个呼吸的光点：曲线在不在动，一眼就看出来（SVG 非等比缩放会把圆压扁，所以用 DOM）
+  const dotY = ((1 - Math.min(1, (feed.live?.dl || 0) / top)) * 100).toFixed(1);
+  const dot = feed.ok ? `<i class="spark-dot" style="top:${dotY}%"></i>` : '';
+  return `<svg class="spark-svg" viewBox="0 0 100 ${H}" preserveAspectRatio="none" aria-hidden="true">
+    ${area ? `<path d="${area}" fill="var(--dl)" opacity="0.13"/>` : ''}
+    <path d="${line(up)}" fill="none" stroke="var(--up)" stroke-width="1.3" stroke-opacity="0.6" vector-effect="non-scaling-stroke"/>
+    <path d="${line(dl)}" fill="none" stroke="var(--dl)" stroke-width="1.6" vector-effect="non-scaling-stroke"/>
+  </svg>${dot}`;
+}
+
+function paintSpark() {
+  const feed = sparkFeed();
+  const html = sparkSvg(feed);
+  for (const id of ['sideSpark', 'statsSpark']) {
+    const el = document.getElementById(id);
+    // 内容没变就别重写 DOM（两处都调，2 秒一轮，能省则省）
+    if (el && el.dataset.paint !== html) {
+      el.innerHTML = html;
+      el.dataset.paint = html;
+    }
+  }
+  const range = sparkRangeText(feed);
+  for (const id of ['sideSparkRange', 'statsSparkRange']) {
+    const el = document.getElementById(id);
+    if (el && el.textContent !== range) el.textContent = range;
+  }
+  /* 连不上了就得说清楚：曲线会停在最后一次采到的时刻一动不动，
+     不标一句，看起来和界面卡死毫无区别。 */
+  const stale = !!(feed?.stale ?? SPARK.data?.stale);
+  // 曲线区已经用空态写了「已断连」时，峰值位置就别重复第二遍
+  const usingEmpty = !feed || !Array.isArray(feed.points) || feed.points.length < 2;
+  const peak = SPARK.data?.max || { dl: 0, up: 0 };
+  const txt = stale
+    ? (usingEmpty ? '' : tr('已断连'))
+    : sparkIdle(feed)
+      ? '' // 空闲时峰值必然是 0，再写「峰值 ↓ —」只会让人以为读坏了
+      : tr('峰值 ↓ {v}', { v: fmtSpeed(peak.dl) });
+  for (const id of ['sideSparkPeak', 'statsSparkPeak']) {
+    const el = document.getElementById(id);
+    if (!el) continue;
+    if (el.textContent !== txt) el.textContent = txt;
+    el.classList.toggle('is-stale', stale);
+  }
+  // 断连时把曲线整块调暗，跟正常状态区分开
+  for (const id of ['sideSpark', 'statsSpark']) {
+    const el = document.getElementById(id);
+    if (el) el.classList.toggle('is-stale', stale);
+  }
+}
+
+async function loadSpark(force = false) {
+  const now = Date.now();
+  if (SPARK.busy) return;
+  if (!force && now - SPARK.at < 4000) return;
+  SPARK.busy = true;
+  try {
+    SPARK.data = await localJson(`/__speed?window=${SPARK_WINDOW}`);
+    SPARK.at = now;
+    paintSpark();
+  } catch {
+    // 采样还没起来（或者服务端是老版本没有这个端点）：折线空着，不影响别的
+  } finally {
+    SPARK.busy = false;
+  }
 }
 
 /* ══════════ 轮询 ══════════ */
@@ -737,12 +999,18 @@ async function tick() {
     const sync = await apiJson(`/sync/maindata?rid=${state.rid}`);
     if (!sync || typeof sync !== 'object') throw new Error('bad sync');
     const unknown = applySync(sync);
+    /* 种子集合没变化就别重排整张表：visibleTorrents() 要对每个种子做一遍
+       filter + sort，几百条时这一项就是轮询里最贵的一步，而 qB 大多数轮次
+       只回 server_state（速度、剩余空间），跟列表无关。 */
+    let changed = Boolean(sync.full_update)
+      || Object.keys(sync.torrents || {}).length > 0
+      || (sync.torrents_removed?.length || 0) > 0;
     if (sync.server_state) {
       // 增量响应里 server_state 只包含变化的字段，需要合并
       state.server = { ...state.server, ...sync.server_state };
     }
     if (sync.rid) state.rid = sync.rid;
-    if (unknown || !state.list.length) await refreshFullList();
+    if (unknown || !state.list.length) { await refreshFullList(); changed = true; }
     if (state.pending.size) {
       const now = Date.now();
       for (const [h, p] of state.pending) {
@@ -750,11 +1018,14 @@ async function tick() {
         const t = state.map.get(h);
         if (t) t.state = p.state;
       }
+      changed = true; // 乐观更新的状态要落到 DOM 上
     }
+    if (state.firstLoad) changed = true;
     state.firstLoad = false;
     try {
-      renderRows();
+      if (changed) renderRows();
       renderServer();
+      paintSpark();      // 每轮把「此刻」的点接到曲线右端，线才会跟着实时速度走
       ensureKinds();
       if (state.detailHash) refreshDetailShell();
     } catch (err) {
@@ -765,7 +1036,7 @@ async function tick() {
     if (!err.unauthorized) {
       state.connected = false;
       const conn = $('#connText');
-      conn.textContent = '连接断开';
+      conn.textContent = tr('连接断开');
       conn.className = 'is-offline';
     }
   } finally {
@@ -837,25 +1108,25 @@ $('#bulkbar').addEventListener('click', async (e) => {
   if (!hashes.length) return;
 
   try {
-    if (action === 'pause') { await setPaused(hashes, true); toast(`已暂停 ${hashes.length} 项`); }
-    else if (action === 'resume') { await setPaused(hashes, false); toast(`已恢复 ${hashes.length} 项`); }
+    if (action === 'pause') { await setPaused(hashes, true); toast(tr('已暂停 {n} 项', { n: hashes.length })); }
+    else if (action === 'resume') { await setPaused(hashes, false); toast(tr('已恢复 {n} 项', { n: hashes.length })); }
     else if (action === 'delete') {
       const r = await confirmDialog({
-        title: `删除 ${hashes.length} 个种子？`,
-        desc: '种子会从列表中移除，已下载的文件默认保留。',
-        okText: '仅删除种子',
-        extraText: '同时删除文件',
+        title: tr('删除 {n} 个种子？', { n: hashes.length }),
+        desc: tr('种子会从列表中移除，已下载的文件默认保留。'),
+        okText: tr('仅删除种子'),
+        extraText: tr('同时删除文件'),
       });
       if (!r) return;
       await torrentsAction('delete', hashes, { deleteFiles: r === 'extra' ? 'true' : 'false' });
       hashes.forEach((h) => { state.selected.delete(h); });
-      toast(`已删除 ${hashes.length} 项`, 'ok');
+      toast(tr('已删除 {n} 项', { n: hashes.length }), 'ok');
     } else if (action === 'clear') {
       state.selected.clear();
     }
     refreshNow();
   } catch (err) {
-    toast(err.message || '操作失败', 'err');
+    toast(err.message || tr('操作失败'), 'err');
   }
 });
 
@@ -875,6 +1146,7 @@ $('#chips').addEventListener('click', (e) => {
 function setFilter(f) {
   state.filter = f;
   state.firstLoad = false;
+  resetPaging();
   renderRows();
   $$('#filterNav .nav-item').forEach((el) => el.classList.toggle('is-active', el.dataset.filter === f));
 }
@@ -884,6 +1156,7 @@ $('#catList').addEventListener('click', (e) => {
   if (!row) return;
   state.category = state.category === row.dataset.cat ? '' : row.dataset.cat;
   state.firstLoad = false;
+  resetPaging();
   renderRows();
   if (isMobile()) closeSidebar();
 });
@@ -893,18 +1166,19 @@ $('#tagList').addEventListener('click', (e) => {
   if (!chip) return;
   state.tag = state.tag === chip.dataset.tag ? '' : chip.dataset.tag;
   state.firstLoad = false;
+  resetPaging();
   renderRows();
 });
 
 /* 新建分类 */
 $('#newCatBtn').addEventListener('click', async (e) => {
   e.stopPropagation();
-  const name = window.prompt('新建分类名称');
+  const name = window.prompt(tr('新建分类名称'));
   if (!name || !name.trim()) return;
   try {
     await post('/torrents/createCategory', { category: name.trim() });
     state.categories = await apiJson('/torrents/categories');
-    toast('分类已创建', 'ok');
+    toast(tr('分类已创建'), 'ok');
     renderCounts();
   } catch (err) { toast(err.message, 'err'); }
 });
@@ -917,6 +1191,7 @@ $('#searchInput').addEventListener('input', (e) => {
   searchTimer = setTimeout(() => {
     state.q = v;
     state.firstLoad = false;
+    resetPaging();
     renderRows();
   }, 120);
 });
@@ -929,6 +1204,7 @@ $('#listHead').addEventListener('click', (e) => {
   if (state.sort.key === key) state.sort.dir *= -1;
   else state.sort = { key, dir: key === 'name' || key === 'state' ? 1 : -1 };
   updateSortUI();
+  resetPaging();
   renderRows();
 });
 
@@ -946,6 +1222,9 @@ const detailScrim = $('#detailScrim');
 
 async function openDetail(hash) {
   closeViewer(); // 换种子时别把上一个种子的预览留在屏幕上
+  // 上一次下拉如果被打断（第二根手指、系统手势），这里把残留的内联位移/透明度清掉；
+  // 顺便作废「滑出中」的那一轮关闭，避免刚点开又被自己关掉
+  resetDrawer(null, detailEl, detailScrim);
   state.detailHash = hash;
   state.detailData = null;
   state.detailTab = 'files';
@@ -955,12 +1234,14 @@ async function openDetail(hash) {
   detailScrim.classList.add('is-open');
   renderDetail();
   try {
-    const [props, files, trackers] = await Promise.all([
+    const [props, files, trackers, peak] = await Promise.all([
       apiJson(`/torrents/properties?hash=${hash}`),
       apiJson(`/torrents/files?hash=${hash}`),
       apiJson(`/torrents/trackers?hash=${hash}`),
+      // 峰值只有本服务知道（qBittorrent 不存），拿不到就当没有
+      localJson(`/__speed/peak?hash=${hash}`).catch(() => null),
     ]);
-    state.detailData = { props, files, trackers };
+    state.detailData = { props, files, trackers, peak: peak?.peak || null };
     renderDetail();
   } catch (err) {
     if (!err.unauthorized) toast(err.message, 'err');
@@ -971,6 +1252,7 @@ function closeDetail() {
   state.detailHash = null;
   state.fileEdit = false;
   closeViewer(); // 详情关了，预览也不该留着
+  resetDrawer(null, detailEl, detailScrim);
   detailEl.classList.remove('is-open');
   detailEl.setAttribute('aria-hidden', 'true');
   detailScrim.classList.remove('is-open');
@@ -1036,7 +1318,7 @@ function openMediaViewer(kind, startName = '') {
   viewerEl.className = 'media-viewer';
   viewerEl.setAttribute('role', 'dialog');
   viewerEl.setAttribute('aria-modal', 'true');
-  viewerEl.setAttribute('aria-label', `${MEDIA_LABEL[kind] || '媒体'}预览`);
+  viewerEl.setAttribute('aria-label', tr('{label}预览', { label: tr(MEDIA_LABEL[kind] || '媒体') }));
   viewerEl.tabIndex = -1;
   viewerEl.innerHTML = `
     <div class="mv-bar">
@@ -1045,16 +1327,17 @@ function openMediaViewer(kind, startName = '') {
         <span class="mv-sub"></span>
       </div>
       <div class="mv-zoomctl" hidden>
-        <button class="mv-btn mv-zoom-btn" type="button" data-zoom="out" aria-label="缩小"><svg><use href="#i-zoom-out"/></svg></button>
-        <button class="mv-zoomval" type="button" data-zoom="reset" title="恢复原始大小">100%</button>
-        <button class="mv-btn mv-zoom-btn" type="button" data-zoom="in" aria-label="放大"><svg><use href="#i-zoom-in"/></svg></button>
+        <button class="mv-btn mv-zoom-btn" type="button" data-zoom="out" aria-label="缩小" data-i18n-aria="缩小"><svg><use href="#i-zoom-out"/></svg></button>
+        <button class="mv-zoomval" type="button" data-zoom="reset" title="恢复原始大小" data-i18n-title="恢复原始大小">100%</button>
+        <button class="mv-btn mv-zoom-btn" type="button" data-zoom="in" aria-label="放大" data-i18n-aria="放大"><svg><use href="#i-zoom-in"/></svg></button>
       </div>
-      <a class="mv-btn mv-dl" aria-label="下载原文件" title="下载原文件"><svg><use href="#i-download"/></svg></a>
-      <button class="mv-btn mv-close" type="button" aria-label="关闭"><svg><use href="#i-x"/></svg></button>
+      <a class="mv-btn mv-dl" aria-label="下载原文件" data-i18n-aria="下载原文件" title="下载原文件" data-i18n-title="下载原文件"><svg><use href="#i-download"/></svg></a>
+      <button class="mv-btn mv-close" type="button" aria-label="关闭" data-i18n-aria="关闭"><svg><use href="#i-x"/></svg></button>
     </div>
     <div class="mv-stage"></div>
-    <button class="mv-nav mv-prev" type="button" aria-label="上一个"><svg><use href="#i-chevron-right"/></svg></button>
-    <button class="mv-nav mv-next" type="button" aria-label="下一个"><svg><use href="#i-chevron-right"/></svg></button>`;
+    <button class="mv-nav mv-prev" type="button" aria-label="上一个" data-i18n-aria="上一个"><svg><use href="#i-chevron-right"/></svg></button>
+    <button class="mv-nav mv-next" type="button" aria-label="下一个" data-i18n-aria="下一个"><svg><use href="#i-chevron-right"/></svg></button>`;
+  applyDom(viewerEl);
   document.body.appendChild(viewerEl);
   document.body.classList.add('mv-open');
   const stage = viewerEl.querySelector('.mv-stage');
@@ -1087,7 +1370,7 @@ function renderViewer() {
   nameEl.textContent = baseName;
   nameEl.title = f.name;
   const sub = [multi ? `${idx + 1} / ${files.length}` : '', fmtBytes(f.size)];
-  if (f.progress != null && f.progress < 1) sub.push(`已下载 ${(f.progress * 100).toFixed(0)}%`);
+  if (f.progress != null && f.progress < 1) sub.push(tr('已下载 {n}%', { n: (f.progress * 100).toFixed(0) }));
   viewerEl.querySelector('.mv-sub').textContent = sub.filter(Boolean).join(' · ');
   const dl = viewerEl.querySelector('.mv-dl');
   dl.href = mediaUrl(f.name, true);
@@ -1113,12 +1396,12 @@ function renderViewer() {
     el.preload = 'metadata';
     el.src = url;
     el.addEventListener('error', () => {
-      if (el.isConnected) viewerFallback('浏览器无法直接播放这个视频。MKV / HEVC / 杜比视界等格式通常需要转码，可以下载后用本地播放器打开。');
+      if (el.isConnected) viewerFallback(tr('浏览器无法直接播放这个视频。MKV / HEVC / 杜比视界等格式通常需要转码，可以下载后用本地播放器打开。'));
     });
     // 缓冲提示：一开始就显示，能播后消失；中途卡顿再出现
     const buffering = document.createElement('div');
     buffering.className = 'mv-buffering is-on';
-    buffering.innerHTML = '<i></i><span>缓冲中…</span>';
+    buffering.innerHTML = `<i></i><span>${esc(tr('缓冲中…'))}</span>`;
     stage.appendChild(buffering);
     const showBuf = () => buffering.classList.add('is-on');
     const hideBuf = () => buffering.classList.remove('is-on');
@@ -1132,7 +1415,7 @@ function renderViewer() {
     el.autoplay = true;
     el.src = url;
     el.addEventListener('error', () => {
-      if (el.isConnected) viewerFallback('浏览器无法播放这个音频，可能还没下载完成，或编码不受支持。');
+      if (el.isConnected) viewerFallback(tr('浏览器无法播放这个音频，可能还没下载完成，或编码不受支持。'));
     });
   } else {
     const wrap = document.createElement('div');
@@ -1149,7 +1432,7 @@ function renderViewer() {
       if (viewerState?.zoom) { clampZoom(); applyZoom(); }
     });
     el.addEventListener('error', () => {
-      if (el.isConnected) viewerFallback('这张图片无法显示：可能还没下载完，或浏览器不支持该格式（例如 HEIC）。可以下载后用本地应用打开。');
+      if (el.isConnected) viewerFallback(tr('这张图片无法显示：可能还没下载完，或浏览器不支持该格式（例如 HEIC）。可以下载后用本地应用打开。'));
     });
     stage.appendChild(wrap);
     applyZoom();
@@ -1253,8 +1536,8 @@ function viewerFallback(message) {
       <svg><use href="#i-alert"/></svg>
       <p>${esc(message)}</p>
       <div class="mv-fallback-actions">
-        <a class="btn btn-soft btn-sm" href="${mediaUrl(f.name, true)}" download>下载文件</a>
-        <a class="btn btn-ghost btn-sm" href="${mediaUrl(f.name)}" target="_blank" rel="noopener">新标签打开</a>
+        <a class="btn btn-soft btn-sm" href="${mediaUrl(f.name, true)}" download>${esc(tr('下载文件'))}</a>
+        <a class="btn btn-ghost btn-sm" href="${mediaUrl(f.name)}" target="_blank" rel="noopener">${esc(tr('新标签打开'))}</a>
       </div>
     </div>`;
 }
@@ -1401,15 +1684,15 @@ function viewerTouchMove(ev) {
     ev.preventDefault();
     return;
   }
-  const tr = viewerState.touch;
-  if (!tr || ev.touches.length !== 1) return;
+  const touch = viewerState.touch;
+  if (!touch || ev.touches.length !== 1) return;
   const t = ev.touches[0];
-  const dx = t.clientX - tr.x;
-  const dy = t.clientY - tr.y;
-  if (Math.abs(dx) + Math.abs(dy) > 6) tr.moved = true;
+  const dx = t.clientX - touch.x;
+  const dy = t.clientY - touch.y;
+  if (Math.abs(dx) + Math.abs(dy) > 6) touch.moved = true;
   if (z.s > 1.001) {
-    z.x = tr.panX + dx;
-    z.y = tr.panY + dy;
+    z.x = touch.panX + dx;
+    z.y = touch.panY + dy;
     clampZoom(z);
     applyZoom();
     suppressNextClick();
@@ -1428,13 +1711,13 @@ function viewerTouchEnd(ev) {
     }
     return;
   }
-  const tr = viewerState.touch;
-  if (!tr) return;
+  const touch = viewerState.touch;
+  if (!touch) return;
   const z = viewerState.zoom;
   const t = ev.changedTouches[0];
-  const dx = t.clientX - tr.x;
-  const dy = t.clientY - tr.y;
-  const moved = tr.moved || Math.abs(dx) > 10 || Math.abs(dy) > 10;
+  const dx = t.clientX - touch.x;
+  const dy = t.clientY - touch.y;
+  const moved = touch.moved || Math.abs(dx) > 10 || Math.abs(dy) > 10;
   viewerState.touch = null;
   if (moved) {
     suppressNextClick();
@@ -1480,8 +1763,25 @@ function mediaBarHtml(files) {
   const btn = (kind, icon, label) => (counts[kind]
     ? `<button class="d-media-btn" type="button" data-browse="${kind}"><svg><use href="#${icon}"/></svg><span>${label}</span><b>${counts[kind]}</b></button>`
     : '');
-  const html = btn('image', 'i-image', '预览图片') + btn('video', 'i-play', '预览视频') + btn('audio', 'i-music', '预览音频');
+  const html = btn('image', 'i-image', tr('预览图片')) + btn('video', 'i-play', tr('预览视频')) + btn('audio', 'i-music', tr('预览音频'));
   return html ? `<div class="d-media-bar">${html}</div>` : '';
+}
+
+/** 平均速度只存在于 /torrents/properties，切到「信息」页时顺手刷一遍，别拿打开面板那一刻的旧值 */
+async function refreshDetailProps() {
+  const hash = state.detailHash;
+  try {
+    const [props, peak] = await Promise.all([
+      apiJson(`/torrents/properties?hash=${hash}`),
+      localJson(`/__speed/peak?hash=${hash}`).catch(() => null),
+    ]);
+    if (hash !== state.detailHash || !state.detailData) return;
+    state.detailData.props = props;
+    state.detailData.peak = peak?.peak || null;
+    renderDetail();
+  } catch {
+    // 拿不到就继续显示旧值，不打扰用户
+  }
 }
 
 function refreshDetailShell() {
@@ -1531,9 +1831,9 @@ function renderDetail() {
   if (data) {
     tabsHtml = `
       <div class="d-tabs">
-        <button class="d-tab ${state.detailTab === 'files' ? 'is-active' : ''}" data-tab="files">文件 ${files.length}</button>
+        <button class="d-tab ${state.detailTab === 'files' ? 'is-active' : ''}" data-tab="files">${esc(tr('文件 {n}', { n: files.length }))}</button>
         <button class="d-tab ${state.detailTab === 'trackers' ? 'is-active' : ''}" data-tab="trackers">Tracker ${trackers.length}</button>
-        <button class="d-tab ${state.detailTab === 'info' ? 'is-active' : ''}" data-tab="info">信息</button>
+        <button class="d-tab ${state.detailTab === 'info' ? 'is-active' : ''}" data-tab="info">${esc(tr('信息'))}</button>
       </div>`;
   }
 
@@ -1545,9 +1845,9 @@ function renderDetail() {
       const skipped = files.filter((f) => f.priority === 0).length;
       const filesBar = files.length
         ? `<div class="d-files-bar">
-            <span class="d-files-sum">${files.length} 个文件${skipped ? ` · 已跳过 ${skipped}` : ''}</span>
+            <span class="d-files-sum">${esc(tr('{n} 个文件', { n: files.length }))}${skipped ? esc(tr('已跳过 {n}', { n: skipped })) : ''}</span>
             <button class="btn btn-ghost btn-sm d-file-edit${editing ? ' is-on' : ''}" id="fileEditBtn" type="button">
-              <svg><use href="#${editing ? 'i-check' : 'i-list'}"/></svg>${editing ? '完成' : '修改下载列表'}
+              <svg><use href="#${editing ? 'i-check' : 'i-list'}"/></svg>${esc(editing ? tr('完成') : tr('修改下载列表'))}
             </button>
           </div>`
         : '';
@@ -1558,43 +1858,48 @@ function renderDetail() {
           return `
           <div class="file-row${done ? '' : ' is-partial'}${f.priority === 0 ? ' is-skip' : ''}">
             <button class="f-toggle ${f.priority > 0 ? 'on' : ''}" data-file="${i}" data-priority="${f.priority}" type="button"
-              ${editing ? '' : 'disabled'} aria-label="${f.priority > 0 ? '跳过' : '恢复'}该文件">
+              ${editing ? '' : 'disabled'} aria-label="${f.priority > 0 ? tr('跳过该文件') : tr('恢复该文件')}">
               <svg><use href="#i-check"/></svg>
             </button>
-            <span class="f-name ${f.priority === 0 ? 'is-skip' : ''} ${kind ? 'is-media' : ''}" ${kind ? `data-media="${i}" title="点击预览"` : ''}>${esc(f.name)}</span>
+            <span class="f-name ${f.priority === 0 ? 'is-skip' : ''} ${kind ? 'is-media' : ''}" ${kind ? `data-media="${i}" title="${esc(tr('点击预览'))}"` : ''}>${esc(f.name)}</span>
             <span class="f-size">${fmtBytes(f.size)}</span>
             <span class="f-prog">${(f.progress * 100).toFixed(0)}%</span>
           </div>`;
         }).join('')
-        : '<div class="d-empty">暂无文件信息</div>';
+        : `<div class="d-empty">${esc(tr('暂无文件信息'))}</div>`;
     } else if (state.detailTab === 'trackers') {
       tabContent = trackers.length
-        ? trackers.map((tr) => {
-          const s = tr.status;
+        ? trackers.map((tk) => {
+          // 注意：这里不能把循环变量叫 tr —— 会遮住上面 import 进来的翻译函数 tr()
+          const s = tk.status;
           const cls = s === 2 ? 'tr-ok' : s === 1 || s === 0 ? 'tr-warn' : 'tr-err';
-          const txt = s === 2 ? '工作中' : s === 1 ? '未联系' : s === 0 ? '已禁用' : '错误';
-          return `<div class="tr-row"><span class="tr-status ${cls}">●</span><span class="tr-url">${esc(tr.url)}</span><span class="tr-status ${cls}">${txt}</span></div>`;
+          const txt = s === 2 ? tr('工作中') : s === 1 ? tr('未联系') : s === 0 ? tr('已禁用') : tr('错误');
+          return `<div class="tr-row"><span class="tr-status ${cls}">●</span><span class="tr-url" title="${esc(tk.url)}">${esc(tk.url)}</span><span class="tr-status ${cls}">${txt}</span></div>`;
         }).join('')
-        : '<div class="d-empty">暂无 Tracker</div>';
+        : `<div class="d-empty">${esc(tr('暂无 Tracker'))}</div>`;
     } else {
       tabContent = `
         <div class="kv-grid">
-          <div class="kv"><span>保存路径</span><b>${esc(t.save_path || t.download_path || '—')}</b></div>
-          <div class="kv"><span>种子大小</span><b>${fmtBytes(t.size)}</b></div>
-          <div class="kv"><span>已下载</span><b>${fmtBytes(t.downloaded)}</b></div>
-          <div class="kv"><span>已上传</span><b>${fmtBytes(t.uploaded)}</b></div>
-          <div class="kv"><span>分享率</span><b>${(t.ratio || 0).toFixed(2)}</b></div>
-          <div class="kv"><span>可用性</span><b>${(t.availability ?? 0).toFixed(2)}</b></div>
-          <div class="kv"><span>做种 / 用户</span><b>${t.num_seeds} / ${t.num_leechs}</b></div>
-          <div class="kv"><span>已连接</span><b>${props ? `${props.seeds} 做种 · ${props.peers} 下载` : '—'}</b></div>
-          <div class="kv"><span>添加时间</span><b>${fmtDate(t.added_on)}</b></div>
-          <div class="kv"><span>完成时间</span><b>${isComplete(t) ? fmtDate(t.completion_on) : '—'}</b></div>
-          <div class="kv"><span>活跃时间</span><b>${fmtDuration(t.time_active)}</b></div>
-          <div class="kv"><span>做种时间</span><b>${fmtDuration(t.seeding_time)}</b></div>
-          <div class="kv"><span>下载 / 上传限速</span><b>${t.dl_limit ? fmtBytes(t.dl_limit) + '/s' : '不限'} / ${t.up_limit ? fmtBytes(t.up_limit) + '/s' : '不限'}</b></div>
-          <div class="kv"><span>哈希</span><b>${t.hash.slice(0, 16)}…</b></div>
-          ${props ? `<div class="kv"><span>分块</span><b>${props.pieces_have} / ${props.pieces_num} · ${fmtBytes(props.piece_size)}</b></div>` : ''}
-          ${t.comment ? `<div class="kv"><span>备注</span><b>${esc(t.comment)}</b></div>` : ''}
+          <div class="kv"><span>${esc(tr('保存路径'))}</span><b>${esc(t.save_path || t.download_path || '—')}</b></div>
+          <div class="kv"><span>${esc(tr('种子大小'))}</span><b>${fmtBytes(t.size)}</b></div>
+          <div class="kv"><span>${esc(tr('已下载'))}</span><b>${fmtBytes(t.downloaded)}</b></div>
+          <div class="kv"><span>${esc(tr('已上传'))}</span><b>${fmtBytes(t.uploaded)}</b></div>
+          ${props ? `<div class="kv"><span title="${esc(tr('qBittorrent 统计：累计下载量 / 有效活跃时长'))}">${esc(tr('平均下载'))}</span><b>${fmtSpeed(props.dl_speed_avg)}</b></div>
+          <div class="kv"><span title="${esc(tr('qBittorrent 统计：累计上传量 / 有效活跃时长'))}">${esc(tr('平均上传'))}</span><b>${fmtSpeed(props.up_speed_avg)}</b></div>` : ''}
+          ${data ? `<div class="kv"><span title="${esc(tr('本服务每 5 秒采样一次取最大值，真实瞬时峰值只会更高；从没跑过的种子显示 —'))}">${esc(tr('峰值下载'))}</span><b>${fmtSpeed(data.peak?.dl || 0)}</b></div>
+          <div class="kv"><span title="${esc(tr('本服务每 5 秒采样一次取最大值，真实瞬时峰值只会更高；从没跑过的种子显示 —'))}">${esc(tr('峰值上传'))}</span><b>${fmtSpeed(data.peak?.up || 0)}</b></div>` : ''}
+          <div class="kv"><span>${esc(tr('分享率'))}</span><b>${(t.ratio || 0).toFixed(2)}</b></div>
+          <div class="kv"><span>${esc(tr('可用性'))}</span><b>${(t.availability ?? 0).toFixed(2)}</b></div>
+          <div class="kv"><span>${esc(tr('做种 / 用户'))}</span><b>${t.num_seeds} / ${t.num_leechs}</b></div>
+          <div class="kv"><span>${esc(tr('已连接'))}</span><b>${props ? esc(tr('{s} 做种 · {p} 下载', { s: props.seeds, p: props.peers })) : '—'}</b></div>
+          <div class="kv"><span>${esc(tr('添加时间'))}</span><b>${fmtDate(t.added_on)}</b></div>
+          <div class="kv"><span>${esc(tr('完成时间'))}</span><b>${isComplete(t) ? fmtDate(t.completion_on) : '—'}</b></div>
+          <div class="kv"><span>${esc(tr('活跃时间'))}</span><b>${fmtDuration(t.time_active)}</b></div>
+          <div class="kv"><span>${esc(tr('做种时间'))}</span><b>${fmtDuration(t.seeding_time)}</b></div>
+          <div class="kv"><span>${esc(tr('下载 / 上传限速'))}</span><b>${t.dl_limit ? fmtBytes(t.dl_limit) + '/s' : esc(tr('不限'))} / ${t.up_limit ? fmtBytes(t.up_limit) + '/s' : esc(tr('不限'))}</b></div>
+          <div class="kv"><span>${esc(tr('哈希'))}</span><b>${t.hash.slice(0, 16)}…</b></div>
+          ${props ? `<div class="kv"><span>${esc(tr('分块'))}</span><b>${props.pieces_have} / ${props.pieces_num} · ${fmtBytes(props.piece_size)}</b></div>` : ''}
+          ${t.comment ? `<div class="kv"><span>${esc(tr('备注'))}</span><b>${esc(t.comment)}</b></div>` : ''}
         </div>`;
     }
   } else {
@@ -1603,7 +1908,7 @@ function renderDetail() {
 
   body.innerHTML = `
     <div class="d-hero">
-      <div class="d-cover" data-detail="cover" title="封面•刮削"><img alt="" loading="lazy" decoding="async" /><svg><use href="#i-inbox"/></svg></div>
+      <div class="d-cover" data-detail="cover" title="${esc(tr('封面•刮削'))}"><img alt="" loading="lazy" decoding="async" /><svg><use href="#i-inbox"/></svg></div>
       ${ringSvg(t.progress, st.key)}
       <div class="d-hero-info">
         <div class="d-speed">
@@ -1612,7 +1917,7 @@ function renderDetail() {
         </div>
         <div class="d-speed" style="color:var(--text-mute);font-size:11.5px">
           <span>${fmtBytes(t.downloaded || 0)} / ${fmtBytes(t.size)}</span>
-          <span>${isComplete(t) ? '分享率 ' + (t.ratio || 0).toFixed(2) : '剩余 ' + fmtEta(t.eta)}</span>
+          <span>${isComplete(t) ? esc(tr('分享率 {v}', { v: (t.ratio || 0).toFixed(2) })) : esc(tr('剩余 {eta}', { eta: fmtEta(t.eta) }))}</span>
         </div>
       </div>
     </div>
@@ -1636,10 +1941,10 @@ function renderDetail() {
   // 底部操作
   const paused = isPaused(t);
   $('#detailFoot').innerHTML = `
-    <button class="btn btn-soft" data-detail="toggle">${paused ? '<svg><use href="#i-play"/></svg>继续' : '<svg><use href="#i-pause"/></svg>暂停'}</button>
-    <button class="btn btn-ghost" data-detail="cover"><svg><use href="#i-photo"/></svg>封面•刮削</button>
-    <button class="btn btn-ghost" data-detail="menu"><svg><use href="#i-more"/></svg>更多</button>
-    <button class="btn btn-ghost danger" data-detail="delete"><svg><use href="#i-trash"/></svg>删除</button>
+    <button class="btn btn-soft" data-detail="toggle">${paused ? `<svg><use href="#i-play"/></svg>${esc(tr('继续'))}` : `<svg><use href="#i-pause"/></svg>${esc(tr('暂停'))}`}</button>
+    <button class="btn btn-ghost" data-detail="cover"><svg><use href="#i-photo"/></svg>${esc(tr('封面•刮削'))}</button>
+    <button class="btn btn-ghost" data-detail="menu"><svg><use href="#i-more"/></svg>${esc(tr('更多'))}</button>
+    <button class="btn btn-ghost danger" data-detail="delete"><svg><use href="#i-trash"/></svg>${esc(tr('删除'))}</button>
   `;
 }
 
@@ -1666,6 +1971,7 @@ $('#detailBody').addEventListener('click', async (e) => {
   if (tab) {
     state.detailTab = tab.dataset.tab;
     renderDetail();
+    if (state.detailTab === 'info') refreshDetailProps();
     return;
   }
   const fileBtn = e.target.closest('[data-file]');
@@ -1690,19 +1996,19 @@ $('#detailFoot').addEventListener('click', async (e) => {
   try {
     if (act === 'toggle') {
       await setPaused([t.hash], !isPaused(t));
-      toast(isPaused(t) ? '已继续' : '已暂停', 'ok');
+      toast(isPaused(t) ? tr('已继续') : tr('已暂停'), 'ok');
       refreshNow();
     } else if (act === 'delete') {
       const r = await confirmDialog({
-        title: '删除这个种子？',
+        title: tr('删除这个种子？'),
         desc: t.name,
-        okText: '仅删除种子',
-        extraText: '同时删除文件',
+        okText: tr('仅删除种子'),
+        extraText: tr('同时删除文件'),
       });
       if (!r) return;
       await torrentsAction('delete', [t.hash], { deleteFiles: r === 'extra' ? 'true' : 'false' });
       closeDetail();
-      toast('已删除', 'ok');
+      toast(tr('已删除'), 'ok');
       refreshNow();
     } else if (act === 'menu') {
       openTorrentMenu(t.hash);
@@ -1726,14 +2032,14 @@ function openTorrentMenu(hash) {
   if (!t) return;
   const paused = isPaused(t);
   openSheet(`
-    <button class="action-item" data-menu="toggle"><svg><use href="#${paused ? 'i-play' : 'i-pause'}"/></svg>${paused ? '继续下载' : '暂停'}</button>
-    <button class="action-item" data-menu="force"><svg><use href="#i-activity"/></svg>${t.force_start ? '取消强制开始' : '强制开始'}</button>
-    <button class="action-item" data-menu="seq"><svg><use href="#i-list"/></svg>${t.seq_dl ? '关闭顺序下载' : '顺序下载'}</button>
-    <button class="action-item" data-menu="cat"><svg><use href="#i-folder"/></svg>设置分类<small>${esc(t.category || '未分类')}</small></button>
-    <button class="action-item" data-menu="cover"><svg><use href="#i-photo"/></svg>封面•刮削<small>自定义 / 目录 / TVDB</small></button>
-    <button class="action-item" data-menu="recheck"><svg><use href="#i-refresh"/></svg>重新校验</button>
-    <button class="action-item" data-menu="reannounce"><svg><use href="#i-wifi"/></svg>重新通告 Tracker</button>
-    <button class="action-item danger" data-menu="delete"><svg><use href="#i-trash"/></svg>删除种子</button>
+    <button class="action-item" data-menu="toggle"><svg><use href="#${paused ? 'i-play' : 'i-pause'}"/></svg>${esc(paused ? tr('继续下载') : tr('暂停'))}</button>
+    <button class="action-item" data-menu="force"><svg><use href="#i-activity"/></svg>${esc(t.force_start ? tr('取消强制开始') : tr('强制开始'))}</button>
+    <button class="action-item" data-menu="seq"><svg><use href="#i-list"/></svg>${esc(t.seq_dl ? tr('关闭顺序下载') : tr('顺序下载'))}</button>
+    <button class="action-item" data-menu="cat"><svg><use href="#i-folder"/></svg>${esc(tr('设置分类'))}<small>${esc(t.category || tr('未分类'))}</small></button>
+    <button class="action-item" data-menu="cover"><svg><use href="#i-photo"/></svg>${esc(tr('封面•刮削'))}<small>${esc(tr('自定义 / 目录 / TVDB'))}</small></button>
+    <button class="action-item" data-menu="recheck"><svg><use href="#i-refresh"/></svg>${esc(tr('重新校验'))}</button>
+    <button class="action-item" data-menu="reannounce"><svg><use href="#i-wifi"/></svg>${esc(tr('重新通告 Tracker'))}</button>
+    <button class="action-item danger" data-menu="delete"><svg><use href="#i-trash"/></svg>${esc(tr('删除种子'))}</button>
   `, t.name);
   $('#actionList')._hash = hash;
 }
@@ -1758,12 +2064,12 @@ $('#actionList').addEventListener('click', async (e) => {
     else if (act === 'reannounce') await post('/torrents/reannounce', { hashes: hash });
     else if (act === 'delete') {
       const r = await confirmDialog({
-        title: '删除这个种子？', desc: t.name, okText: '仅删除种子', extraText: '同时删除文件',
+        title: tr('删除这个种子？'), desc: t.name, okText: tr('仅删除种子'), extraText: tr('同时删除文件'),
       });
       if (!r) return;
       await torrentsAction('delete', [hash], { deleteFiles: r === 'extra' ? 'true' : 'false' });
       if (state.detailHash === hash) closeDetail();
-      toast('已删除', 'ok');
+      toast(tr('已删除'), 'ok');
     }
     refreshNow();
   } catch (err) { toast(err.message, 'err'); }
@@ -1771,10 +2077,10 @@ $('#actionList').addEventListener('click', async (e) => {
 
 function openCategorySheet(hash) {
   const t = state.map.get(hash);
-  const list = Object.keys(state.categories || {}).sort((a, b) => a.localeCompare(b, 'zh-CN'));
+  const list = Object.keys(state.categories || {}).sort((a, b) => a.localeCompare(b, localeTag()));
   openSheet(`
-    <button class="action-item" data-setcat=""><svg><use href="#i-inbox"/></svg>未分类</button>
-    ${list.map((c) => `<button class="action-item" data-setcat="${esc(c)}"><svg><use href="#i-folder"/></svg>${esc(c)}${t.category === c ? '<small>当前</small>' : ''}</button>`).join('')}
+    <button class="action-item" data-setcat=""><svg><use href="#i-inbox"/></svg>${esc(tr('未分类'))}</button>
+    ${list.map((c) => `<button class="action-item" data-setcat="${esc(c)}"><svg><use href="#i-folder"/></svg>${esc(c)}${t.category === c ? `<small>${esc(tr('当前'))}</small>` : ''}</button>`).join('')}
   `, t.name);
   $('#actionList')._hash = hash;
 }
@@ -1786,7 +2092,7 @@ $('#actionList').addEventListener('click', async (e) => {
   closeModal('actionModal');
   try {
     await post('/torrents/setCategory', { hashes: hash, category: btn.dataset.setcat });
-    toast('分类已更新', 'ok');
+    toast(tr('分类已更新'), 'ok');
     refreshNow();
   } catch (err) { toast(err.message, 'err'); }
 });
@@ -1801,24 +2107,24 @@ async function coverPost(path, body, hash = coverHash) {
     body: JSON.stringify(body || {}),
   });
   const data = await res.json().catch(() => ({}));
-  if (!res.ok) throw new Error(data.message || '操作失败');
+  if (!res.ok) throw new Error(data.message || tr('操作失败'));
   return data;
 }
 
 async function uploadCoverFile(hash, file, quiet = false) {
-  if (!/^image\//.test(file.type)) { toast('请选择图片文件', 'err'); return false; }
-  if (file.size > 8 * 1024 * 1024) { toast('图片请控制在 8MB 以内', 'err'); return false; }
+  if (!/^image\//.test(file.type)) { toast(tr('请选择图片文件'), 'err'); return false; }
+  if (file.size > 8 * 1024 * 1024) { toast(tr('图片请控制在 8MB 以内'), 'err'); return false; }
   try {
     const res = await fetch(`/__cover/upload?hash=${hash}`, { method: 'POST', body: file });
     const data = await res.json().catch(() => ({}));
-    if (!res.ok) throw new Error(data.message || '上传失败');
+    if (!res.ok) throw new Error(data.message || tr('上传失败'));
     state.coverMode.set(hash, 'custom');
     bumpCover(hash);
     if (coverHash === hash) afterCoverChange(hash);
-    else if (!quiet) toast('封面已设置', 'ok');
+    else if (!quiet) toast(tr('封面已设置'), 'ok');
     return true;
   } catch (err) {
-    toast(err.message || '封面上传失败', 'err');
+    toast(err.message || tr('封面上传失败'), 'err');
     return false;
   }
 }
@@ -1844,9 +2150,9 @@ function showCoverKind(hash, weights) {
   let detail = '';
   if (total > 0) {
     const top = Object.entries(w).sort((a, b) => b[1] - a[1])[0];
-    detail = ` · 体积占 ${Math.round((top[1] / total) * 100)}%`;
+    detail = tr(' · 体积占 {n}%', { n: Math.round((top[1] / total) * 100) });
   }
-  el.textContent = `判定类型：${meta.label}${detail}`;
+  el.textContent = tr('判定类型：{label}', { label: tr(meta.label) }) + detail;
 }
 
 function paintCoverBig() {
@@ -1878,10 +2184,10 @@ async function loadCoverCandidates(hash) {
   if (coverHash !== hash) return; // 已经切到别的种子
   const grid = $('#coverGrid');
   if (!data || data.error) {
-    $('#coverMode').textContent = '目录不可用';
+    $('#coverMode').textContent = tr('目录不可用');
     $('#coverDir').textContent = '';
     $('#coverCount').textContent = '';
-    grid.innerHTML = '<div class="cover-empty">读取不到这个种子的目录</div>';
+    grid.innerHTML = `<div class="cover-empty">${esc(tr('读取不到这个种子的目录'))}</div>`;
     return;
   }
   state.coverMode.set(hash, data.mode);
@@ -1889,27 +2195,27 @@ async function loadCoverCandidates(hash) {
   showCoverKind(hash, data.weights);
   if (!data.dir) {
     // 单文件种子直接躺在共享下载目录里：不去扫别人的图，直接引导上传
-    $('#coverMode').textContent = data.mode === 'custom' ? '当前：自定义图片' : '当前：类型图标';
-    $('#coverDir').textContent = '没有独立目录';
+    $('#coverMode').textContent = data.mode === 'custom' ? tr('当前：自定义图片') : tr('当前：类型图标');
+    $('#coverDir').textContent = tr('没有独立目录');
     $('#coverCount').textContent = '';
-    grid.innerHTML = '<div class="cover-empty">这个种子没有独立目录，为避免误用同目录下别人的图片，目录匹配已跳过。<br>可以自己上传一张。</div>';
+    grid.innerHTML = `<div class="cover-empty">${tr('这个种子没有独立目录，为避免误用同目录下别人的图片，目录匹配已跳过。<br>可以自己上传一张。')}</div>`;
     paintCoverBig();
     return;
   }
   $('#coverMode').textContent =
-    data.mode === 'custom' ? '当前：自定义图片'
-      : data.mode === 'tvdb' ? `当前：TheTVDB 刮削${data.tvdb?.year ? `（${data.tvdb.year}）` : ''}`
-        : data.mode === 'icon' ? '当前：类型图标'
-          : '当前：自动（目录图片 → 类型图标）';
+    data.mode === 'custom' ? tr('当前：自定义图片')
+      : data.mode === 'tvdb' ? tr('当前：TheTVDB 刮削') + (data.tvdb?.year ? ` (${data.tvdb.year})` : '')
+        : data.mode === 'icon' ? tr('当前：类型图标')
+          : tr('当前：自动（目录图片 → 类型图标）');
   $('#coverDir').textContent = shortPath(data.dir);
-  $('#coverCount').textContent = data.count ? `${data.count} 张` : '目录里没找到图片';
+  $('#coverCount').textContent = data.count ? tr('{n} 张', { n: data.count }) : tr('目录里没找到图片');
   grid.innerHTML = data.items.length
     ? data.items.map((it) => `
       <button class="cover-item" data-rel="${esc(it.rel)}" title="${esc(it.name)}">
         <img src="/__cover/raw?hash=${hash}&rel=${encodeURIComponent(it.rel)}" alt="" loading="lazy" decoding="async" />
         <span>${esc(it.name)}</span>
       </button>`).join('')
-    : '<div class="cover-empty">这个种子的目录里没有可用图片，可以自己上传一张</div>';
+    : `<div class="cover-empty">${esc(tr('这个种子的目录里没有可用图片，可以自己上传一张'))}</div>`;
   paintCoverBig();
 }
 
@@ -1919,7 +2225,7 @@ async function openCoverModal(hash) {
   coverHash = hash;
   $('#coverName').textContent = t.name;
   $('#coverName').title = t.name;
-  $('#coverMode').textContent = '读取中…';
+  $('#coverMode').textContent = tr('读取中…');
   $('#coverDir').textContent = '';
   $('#coverCount').textContent = '';
   $('#coverGrid').innerHTML = '<div class="cover-skel"></div><div class="cover-skel"></div><div class="cover-skel"></div><div class="cover-skel"></div>';
@@ -1948,7 +2254,7 @@ $('#coverIcon').addEventListener('click', async () => {
     await coverPost('/__cover/mode', { mode: 'icon' });
     state.coverMode.set(coverHash, 'icon');
     afterCoverChange();
-    toast('已改成类型图标', 'ok');
+    toast(tr('已改成类型图标'), 'ok');
   } catch (err) { toast(err.message, 'err'); }
 });
 
@@ -1958,7 +2264,7 @@ $('#coverAuto').addEventListener('click', async () => {
     await coverPost('/__cover/mode', { mode: 'auto' });
     state.coverMode.set(coverHash, 'auto');
     afterCoverChange();
-    toast('已恢复自动封面', 'ok');
+    toast(tr('已恢复自动封面'), 'ok');
   } catch (err) { toast(err.message, 'err'); }
 });
 
@@ -1969,7 +2275,7 @@ $('#coverGrid').addEventListener('click', async (e) => {
     await coverPost('/__cover/from-dir', { rel: item.dataset.rel });
     state.coverMode.set(coverHash, 'custom');
     afterCoverChange();
-    toast('封面已更换', 'ok');
+    toast(tr('封面已更换'), 'ok');
   } catch (err) { toast(err.message, 'err'); }
 });
 
@@ -2017,7 +2323,7 @@ function tvdbDisabled(text) {
   tvdbShowStage('cand');
   $('#tvdbSide').hidden = true;
   $('#tvdbSide').innerHTML = '';
-  $('#tvdbList').innerHTML = `<div class="cover-empty">${esc(text)}<br>到「设置 → TheTVDB 刮削」里填上自己的 API Key 就能用。</div>`;
+  $('#tvdbList').innerHTML = `<div class="cover-empty">${esc(text)}<br>${esc(tr('到「设置 → TheTVDB 刮削」里填上自己的 API Key 就能用。'))}</div>`;
 }
 
 /** 右边那块：大海报 + 片名 + 年份类型 + 简介 + 两个动作 */
@@ -2029,7 +2335,7 @@ function tvdbRenderSide(it) {
     return;
   }
   const meta = [
-    it.type === 'movie' ? '电影' : '剧集',
+    it.type === 'movie' ? tr('电影') : tr('剧集'),
     it.year || '',
     it.nameEn && it.nameEn !== it.name ? it.nameEn : '',
   ].filter(Boolean).join(' · ');
@@ -2043,10 +2349,10 @@ function tvdbRenderSide(it) {
       <p class="tvdb-side-meta">${esc(meta)}</p>
       <p class="tvdb-side-desc${it.overview ? '' : ' is-empty'}">${it.overview
         ? esc(it.overview)
-        : 'TheTVDB 上没有简介，点开海报看看对不对得上也一样。'}</p>
+        : esc(tr('TheTVDB 上没有简介，点开海报看看对不对得上也一样。'))}</p>
       <div class="tvdb-side-acts">
-        <button class="btn btn-primary btn-sm" data-act="posters"><svg><use href="#i-image"/></svg>看它的海报</button>
-        <button class="btn btn-soft btn-sm" data-act="apply"><svg><use href="#i-check"/></svg>直接套用第一张</button>
+        <button class="btn btn-primary btn-sm" data-act="posters"><svg><use href="#i-image"/></svg>${esc(tr('看它的海报'))}</button>
+        <button class="btn btn-soft btn-sm" data-act="apply"><svg><use href="#i-check"/></svg>${esc(tr('直接套用第一张'))}</button>
       </div>
     </div>`;
 }
@@ -2078,7 +2384,7 @@ function renderTvdbCandidates(items, { select = 0, hint = '' } = {}) {
     tvdbSel = -1;
     $('#tvdbSide').hidden = true;
     $('#tvdbSide').innerHTML = '';
-    $('#tvdbList').innerHTML = '<div class="cover-empty">TheTVDB 上没搜到，换个名字试试（可以只填英文主标题）</div>';
+    $('#tvdbList').innerHTML = `<div class="cover-empty">${esc(tr('TheTVDB 上没搜到，换个名字试试（可以只填英文主标题）'))}</div>`;
     return;
   }
   $('#tvdbList').innerHTML = items.map((it, i) => `
@@ -2088,7 +2394,7 @@ function renderTvdbCandidates(items, { select = 0, hint = '' } = {}) {
         : '<svg><use href="#i-image"/></svg>'}</span>
       <span class="tvdb-row-txt">
         <b>${esc(it.name)}</b>
-        <small>${esc(it.type === 'movie' ? '电影' : '剧集')}${it.year ? ` · ${esc(it.year)}` : ''}${it.nameEn && it.nameEn !== it.name ? ` · ${esc(it.nameEn)}` : ''}</small>
+        <small>${esc(it.type === 'movie' ? tr('电影') : tr('剧集'))}${it.year ? ` · ${esc(it.year)}` : ''}${it.nameEn && it.nameEn !== it.name ? ` · ${esc(it.nameEn)}` : ''}</small>
       </span>
     </button>`).join('');
   tvdbSelect(items[select] ? select : 0);
@@ -2100,13 +2406,13 @@ function renderTvdbPosters(items, meta, { back = true } = {}) {
   $('#tvdbBack').hidden = !back;
   tvdbShowStage('art');
   if (!items.length) {
-    $('#tvdbGrid').innerHTML = '<div class="cover-empty">这部作品在 TheTVDB 上还没有海报</div>';
+    $('#tvdbGrid').innerHTML = `<div class="cover-empty">${esc(tr('这部作品在 TheTVDB 上还没有海报'))}</div>`;
     return;
   }
   $('#tvdbGrid').innerHTML = items.map((a, i) => `
-    <button class="cover-item tvdb-item" data-image="${esc(a.image)}" title="海报 ${i + 1}${a.kind === 'backdrop' ? '（背景图）' : ''}">
+    <button class="cover-item tvdb-item" data-image="${esc(a.image)}" title="${esc(tr('海报 {n}', { n: i + 1 }))}${a.kind === 'backdrop' ? esc(tr('（背景图）')) : ''}">
       <img src="${esc(a.thumb || a.image)}" data-full="${esc(a.image)}" alt="" loading="lazy" decoding="async" referrerpolicy="no-referrer" />
-      <span class="tvdb-cap"><small>${a.kind === 'backdrop' ? '背景图' : '海报'} · ${a.lang || '—'}</small></span>
+      <span class="tvdb-cap"><small>${esc(a.kind === 'backdrop' ? tr('背景图') : tr('海报'))} · ${a.lang || '—'}</small></span>
     </button>`).join('');
   // 有些作品只有原图、没有缩略图（缩略图 URL 会 404/403），加载失败就退回原图
   for (const img of $$('#tvdbGrid img[data-full]')) {
@@ -2122,20 +2428,23 @@ async function tvdbSearchNow() {
   const q = $('#tvdbQuery').value.trim();
   const type = $('#tvdbType').value;
   tvdbSkeleton();
-  tvdbSetHint('搜索中…', true);
+  tvdbSetHint(tr('搜索中…'), true);
   try {
     const res = await fetch(`/__cover/tvdb/search?hash=${h}&q=${encodeURIComponent(q)}&type=${encodeURIComponent(type)}`);
     const data = await res.json().catch(() => ({}));
     if (coverHash !== h) return; // 弹窗已经切到别的种子
-    if (!res.ok) throw new Error(data.message || '搜索失败');
+    if (!res.ok) throw new Error(data.message || tr('搜索失败'));
     if (!q && data.parsed?.title && $('#tvdbQuery').value.trim() === '') $('#tvdbQuery').value = data.parsed.title;
     // 中英混排的名字会被拆成多个查询词逐个试，说清楚最后是按哪个词搜到的
-    const used = data.query && data.query !== (q || data.parsed?.title || '') ? ` · 按「${data.query}」搜到` : '';
-    const listHint = `识别为「${data.parsed?.title || '—'}」${data.parsed?.year ? ` ${data.parsed.year}` : ''}${data.parsed?.season ? ` 第${data.parsed.season}季` : ''}${used} ${(data.items || []).length} 个结果`;
+    const used = data.query && data.query !== (q || data.parsed?.title || '') ? tr(' · 按「{q}」搜到', { q: data.query }) : '';
+    const listHint = tr('识别为「{title}」', { title: data.parsed?.title || '—' })
+      + (data.parsed?.year ? ` ${data.parsed.year}` : '')
+      + (data.parsed?.season ? tr(' 第{n}季', { n: data.parsed.season }) : '')
+      + used + ' ' + tr('{n} 个结果', { n: (data.items || []).length });
     renderTvdbCandidates(data.items || [], { hint: listHint });
     tvdbSetHint(listHint);
   } catch (err) {
-    tvdbSetHint('搜索失败');
+    tvdbSetHint(tr('搜索失败'));
     tvdbShowStage('cand');
     $('#tvdbSide').hidden = true;
     $('#tvdbSide').innerHTML = '';
@@ -2145,15 +2454,15 @@ async function tvdbSearchNow() {
 
 async function tvdbOpenArt(id, type, name, year, nameEn = '') {
   tvdbSkeleton(6, 'art');
-  tvdbSetHint(`读取《${name}》的海报…`, true);
+  tvdbSetHint(tr('读取《{name}》的海报…', { name }), true);
   try {
     const res = await fetch(`/__cover/tvdb/art?hash=${coverHash}&id=${encodeURIComponent(id)}&type=${encodeURIComponent(type)}`);
     const data = await res.json().catch(() => ({}));
-    if (!res.ok) throw new Error(data.message || '读取失败');
+    if (!res.ok) throw new Error(data.message || tr('读取失败'));
     renderTvdbPosters(data.items || [], { id, type, name, nameEn, year });
-    tvdbSetHint(`《${name}》· ${(data.items || []).length} 张可选，点一张套用`);
+    tvdbSetHint(tr('《{name}》· {n} 张可选，点一张套用', { name, n: (data.items || []).length }));
   } catch (err) {
-    tvdbSetHint('读取失败');
+    tvdbSetHint(tr('读取失败'));
     tvdbShowStage('art');
     $('#tvdbGrid').innerHTML = `<div class="cover-empty">${esc(err.message)}</div>`;
   }
@@ -2172,14 +2481,14 @@ async function tvdbApplyFirst(it, btn) {
   const h = coverHash;
   const old = btn.innerHTML;
   btn.disabled = true;
-  btn.innerHTML = '<svg><use href="#i-refresh"/></svg>套用中…';
+  btn.innerHTML = `<svg><use href="#i-refresh"/></svg>${esc(tr('套用中…'))}`;
   try {
     const res = await fetch(`/__cover/tvdb/art?hash=${h}&id=${encodeURIComponent(it.id)}&type=${encodeURIComponent(it.type)}`);
     const data = await res.json().catch(() => ({}));
-    if (!res.ok) throw new Error(data.message || '读取海报失败');
+    if (!res.ok) throw new Error(data.message || tr('读取海报失败'));
     const arts = data.items || [];
     const first = arts.find((a) => a.kind !== 'backdrop') || arts[0];
-    if (!first) throw new Error('这部作品在 TheTVDB 上还没有海报');
+    if (!first) throw new Error(tr('这部作品在 TheTVDB 上还没有海报'));
     await tvdbApply({ id: it.id, type: it.type, image: first.image, name: it.name, nameEn: it.nameEn || '', year: it.year });
   } catch (err) {
     toast(err.message, 'err');
@@ -2197,12 +2506,12 @@ async function tvdbApply(meta) {
       body: JSON.stringify(meta),
     });
     const data = await res.json().catch(() => ({}));
-    if (!res.ok) throw new Error(data.message || '套用失败');
+    if (!res.ok) throw new Error(data.message || tr('套用失败'));
     state.coverMode.set(coverHash, 'tvdb');
     afterCoverChange();
-    $('#coverTvdbName').textContent = meta.name ? `《${meta.name}》` : '';
-    tvdbSetHint(meta.name ? `已套用《${meta.name}》${meta.year ? ` (${meta.year})` : ''}` : '已套用海报');
-    toast('封面已从 TheTVDB 刮削', 'ok');
+    $('#coverTvdbName').textContent = meta.name ? titled(meta.name) : '';
+    tvdbSetHint(meta.name ? tr('已套用《{name}》', { name: meta.name }) + (meta.year ? ` (${meta.year})` : '') : tr('已套用海报'));
+    toast(tr('封面已从 TheTVDB 刮削'), 'ok');
   } catch (err) {
     toast(err.message, 'err');
   }
@@ -2244,7 +2553,7 @@ async function tvdbAutoMatch({ silent = false } = {}) {
   if (!coverHash || tvdbAutoBusy) return false;
   const h = coverHash;
   tvdbAutoBusy = true;
-  if (!silent) { tvdbSkeleton(); tvdbSetHint('自动匹配中…', true); }
+  if (!silent) { tvdbSkeleton(); tvdbSetHint(tr('自动匹配中…'), true); }
   try {
     const res = await fetch('/__cover/tvdb/auto', {
       method: 'POST',
@@ -2253,30 +2562,30 @@ async function tvdbAutoMatch({ silent = false } = {}) {
     });
     const data = await res.json().catch(() => ({}));
     if (coverHash !== h) return false; // 弹窗已经切到别的种子
-    if (!res.ok) throw new Error(data.message || '匹配失败');
+    if (!res.ok) throw new Error(data.message || tr('匹配失败'));
     const r = (data.results || {})[h] || {};
     if (r.ok) {
       state.coverMode.set(h, 'tvdb');
       afterCoverChange(h);
-      $('#coverTvdbName').textContent = `《${r.name}》`;
-      const label = `《${r.name}》${r.year ? `（${r.year}）` : ''}`;
+      $('#coverTvdbName').textContent = titled(r.name);
+      const label = titled(r.name) + (r.year ? ` (${r.year})` : '');
       // 第一张已经套上了，海报列表也铺出来——想换一张直接点，不用再搜一次
       if (r.arts?.length) renderTvdbPosters(r.arts, { id: r.id, type: r.type, name: r.name, nameEn: r.nameEn || '', year: r.year }, { back: false });
-      tvdbSetHint(`已套用${label}的第一张海报${r.arts?.length > 1 ? `，另有 ${r.arts.length - 1} 张可点选` : ''}`);
-      toast(`已套用${label}的海报`, 'ok');
+      tvdbSetHint(tr('已套用{label}的第一张海报', { label }) + (r.arts?.length > 1 ? tr('，另有 {n} 张可点选', { n: r.arts.length - 1 }) : ''));
+      toast(tr('已套用{label}的海报', { label }), 'ok');
       return true;
     }
     // 没把握就别硬套，把候选摆出来让用户自己点
     const named = r.parsed?.title ? `「${r.parsed.title}」` : '';
-    const namedFrom = r.nameFrom === 'file' ? '（按种子里的正片文件名）' : '';
+    const namedFrom = r.nameFrom === 'file' ? tr('（按种子里的正片文件名）') : '';
     const listHint = r.items?.length
-      ? `识别为${named}${namedFrom}，不敢确定是哪一部，挑一个看看简介`
-      : `TheTVDB 上没找到${named}${namedFrom}，换个关键词试试（中英混排的名字可以只填英文）`;
+      ? tr('识别为{name}{from}，不敢确定是哪一部，挑一个看看简介', { name: named, from: namedFrom })
+      : tr('TheTVDB 上没找到{name}{from}，换个关键词试试（中英混排的名字可以只填英文）', { name: named, from: namedFrom });
     renderTvdbCandidates(r.items || [], { select: 0, hint: listHint });
     tvdbSetHint(listHint);
     return false;
   } catch (err) {
-    tvdbSetHint('匹配失败');
+    tvdbSetHint(tr('匹配失败'));
     tvdbShowStage('cand');
     $('#tvdbSide').hidden = true;
     $('#tvdbSide').innerHTML = '';
@@ -2325,20 +2634,29 @@ async function loadTvdbPanel(hash) {
     Object.assign(state.tvdb, {
       enabled: Boolean(st.enabled), configured: Boolean(st.configured), auto: st.auto || 'off', lang: st.lang || 'eng',
     });
-    if (!st.configured) { tvdbDisabled('还没配置 TheTVDB'); return; }
-    if (!st.enabled) { tvdbDisabled('TheTVDB 刮削已关闭'); return; }
+    if (!st.configured) { tvdbDisabled(tr('还没配置 TheTVDB')); return; }
+    if (!st.enabled) { tvdbDisabled(tr('TheTVDB 刮削已关闭')); return; }
     $('#tvdbQuery').value = st.parsed?.title || t?.name || '';
     $('#tvdbType').value = st.parsed?.isSeries ? 'series' : '';
     if (st.current?.name) {
-      $('#coverTvdbName').textContent = `《${st.current.name}》`;
-      tvdbSetHint(`当前：TheTVDB · ${st.current.type === 'movie' ? '电影' : '剧集'}${st.current.year ? ` ${st.current.year}` : ''}`);
+      $('#coverTvdbName').textContent = titled(st.current.name);
+      tvdbSetHint(tr('当前：TheTVDB · {type}{year}', {
+        type: st.current.type === 'movie' ? tr('电影') : tr('剧集'),
+        year: st.current.year ? ` ${st.current.year}` : '',
+      }));
     } else if (st.mode === 'custom' || st.mode === 'icon') {
       // 用户自己设过图（上传 / 粘贴 / 用图标）：打开弹窗别再拿自动匹配把它盖掉
       $('#coverTvdbName').textContent = '';
-      tvdbSetHint(st.mode === 'custom' ? '当前是自定义图片，想换成刮削海报点「自动匹配」' : '当前用的是类型图标，想换海报点「自动匹配」');
+      tvdbSetHint(st.mode === 'custom' ? tr('当前是自定义图片，想换成刮削海报点「自动匹配」') : tr('当前用的是类型图标，想换海报点「自动匹配」'));
     } else {
-      const fromLabel = st.nameFrom === 'file' ? '（按种子里的正片文件名）' : '';
-      tvdbSetHint(st.parsed?.title ? `识别为「${st.parsed.title}」${st.parsed.year ? ` ${st.parsed.year}` : ''}${fromLabel}，正在自动匹配…` : '—');
+      const fromLabel = st.nameFrom === 'file' ? tr('（按种子里的正片文件名）') : '';
+      tvdbSetHint(st.parsed?.title
+        ? tr('识别为「{title}」{year}{from}，正在自动匹配…', {
+          title: st.parsed.title,
+          year: st.parsed.year ? ` ${st.parsed.year}` : '',
+          from: fromLabel,
+        })
+        : '—');
       // 还没刮过的种子：打开就把自动匹配跑掉，命中直接套第一张海报，不命中才留候选给人挑
       tvdbAutoMatch({ silent: true });
     }
@@ -2346,15 +2664,38 @@ async function loadTvdbPanel(hash) {
 }
 
 /* ══════════ 弹窗基础 ══════════ */
+/* 下拉手势被打断时可能留下内联样式（卡片停在半路、遮罩停在半透明）。
+   开和关都先清一遍，等于自带兜底：手势层万一再出岔子，下次打开也是干净的。 */
+function resetDrawer(host, card, scrim) {
+  if (host) host.classList.remove('is-dragging');
+  if (card) {
+    card.classList.remove('is-dragging');
+    card.style.removeProperty('transition');
+    card.style.removeProperty('transform');
+    // 作废这一轮关闭：滑出动画跑到一半又被重新打开时，收尾回调据此放手
+    card._closeToken = null;
+  }
+  if (scrim) {
+    scrim.classList.remove('is-dragging');
+    scrim.style.removeProperty('opacity');
+  }
+}
+
+function resetModalDrawer(el) {
+  resetDrawer(el, el.querySelector('.modal-card, .sheet-card'), el.querySelector('.modal-scrim'));
+}
+
 function openModal(id) {
   const el = document.getElementById(id);
   if (!el) return;
+  resetModalDrawer(el);
   el.hidden = false;
   document.body.dataset.modal = id;
 }
 function closeModal(id) {
   const el = document.getElementById(id);
   if (!el) return;
+  resetModalDrawer(el);
   el.hidden = true;
   if (id === 'addModal') closePathMenu();
   delete document.body.dataset.modal;
@@ -2368,12 +2709,203 @@ document.addEventListener('click', (e) => {
   }
 });
 
-function confirmDialog({ title, desc, okText = '确定', extraText, danger = true }) {
+/* ══════════ 抽屉下拉关闭（窄屏） ══════════ */
+/* 手机上所有从底部上弹的抽屉（详情 / 操作菜单 / 概览 / 各弹窗）都能按住顶部往下拽关闭：
+   · 卡片顶部 64px（拖拽条 + 标题栏）直接接管，不跟内层滚动打架
+   · 内容已经滚到顶时继续往下拽也接管（iOS 那套手感），往上推则照常滚动
+   · 拽过 88px 或者甩得够快就关，否则弹回去
+   登录框不参与（关了就没法用），确认框下拉等同「取消」，Promise 正常结束
+
+   几条踩过坑才补上的硬规矩：
+   1. 位移每帧只写一次（rAF）。touchmove 一帧能来好几次、120Hz 机型更密，
+      每次 touchmove 都写一遍 style 等于一帧重排好几遍，越拖越沉。
+   2. 遮罩是独立图层，只改 opacity（纯合成）；拖拽期间把它的 transition 和
+      全屏模糊一起关掉，否则每写一次都会重启过渡 + 重算高斯，遮罩永远慢半拍。
+   3. 任何「中途放弃」都必须走同一条收尾路径把内联样式清干净。以前第二根手指
+      一落下就直接 `drawerDrag = null` 丢掉引用：卡片停在半路、遮罩停在半透明，
+      而 drawerEnd 已经拿不到它，谁也救不回来——「有概率遮罩不消失」就是这个。 */
+const DRAWER_TOP_ZONE = 64;   // 顶部这个范围内按住就接管
+const DRAWER_DISMISS = 88;    // 拽过这么远就关
+const DRAWER_FLICK = 0.55;    // px/ms，甩得够快也关
+const DRAWER_DEAD = 6;        // 起手死区，手指抖一下不算
+let drawerDrag = null;
+let drawerRaf = 0;
+
+function drawerCardOf(target) {
+  const card = target.closest?.('.modal-card, .sheet-card, .detail');
+  if (!card) return null;
+  const modal = card.closest('.modal');
+  if (modal && modal.hidden) return null;
+  if (modal && modal.id === 'loginModal') return null;
+  if (card.classList.contains('detail') && !card.classList.contains('is-open')) return null;
+  return card;
+}
+
+/** 卡片对应的遮罩：详情是独立的 scrim，弹窗是 .modal 里那层 .modal-scrim */
+function drawerScrimOf(card) {
+  if (card.classList.contains('detail')) return detailScrim;
+  return card.closest('.modal')?.querySelector('.modal-scrim') || null;
+}
+
+/** 遮罩跟着手指走：p = 0 全黑，1 全透明；null 表示清掉内联样式回到 CSS 值 */
+function drawerFade(g, p) {
+  if (!g.scrim) return;
+  if (p == null) g.scrim.style.removeProperty('opacity');
+  else g.scrim.style.opacity = String(Math.max(0, 1 - p));
+}
+
+/** 过渡结束回调：以 transitionend 为准（系统降级动画时长会变），定时器兜底防漏 */
+function drawerAfter(el, ms, fn) {
+  let done = false;
+  const finish = () => {
+    if (done) return;
+    done = true;
+    el.removeEventListener('transitionend', onEnd);
+    clearTimeout(timer);
+    fn();
+  };
+  const onEnd = (e) => { if (e.target === el && e.propertyName === 'transform') finish(); };
+  el.addEventListener('transitionend', onEnd);
+  const timer = setTimeout(finish, ms + 120);
+}
+
+/** 一帧一次：把累计位移和遮罩透明度写下去 */
+function drawerFrame() {
+  drawerRaf = 0;
+  const g = drawerDrag;
+  if (!g || !g.active) return;
+  // 越拖越沉：过了卡片高度之后基本拉不动，手感上「拽到底了」
+  const y = g.dy <= g.h ? g.dy : g.h + (g.dy - g.h) * 0.25;
+  g.y = y;
+  g.card.style.transform = `translate3d(0, ${y.toFixed(1)}px, 0)`;
+  drawerFade(g, Math.min(1, g.dy / (g.h * 1.1)));
+  g.trail.push({ y, t: performance.now() });
+  if (g.trail.length > 6) g.trail.shift();
+}
+
+function drawerClose(card) {
+  const modal = card.closest('.modal');
+  if (card.classList.contains('detail')) { closeDetail(); return; }
+  if (!modal) return;
+  // 确认框走「取消」按钮，让它自己的 Promise 正常结束，不是直接 hidden
+  const cancel = modal.id === 'confirmModal' ? modal.querySelector('#confirmCancel') : null;
+  if (cancel) { cancel.click(); return; }
+  closeModal(modal.id);
+}
+
+document.addEventListener('touchstart', (e) => {
+  // 上一次手势要是没等到 touchend / touchcancel（系统手势抢走、页面被切走之类），
+  // 这里把它当成「取消」收掉，免得整套下拉手势永久失效
+  if (drawerDrag && performance.now() - drawerDrag.t0 > 5000) drawerEnd(true);
+  if (drawerDrag || e.touches.length !== 1) return;
+  if (!window.matchMedia('(max-width: 900px)').matches) return;
+  const card = drawerCardOf(e.target);
+  if (!card) return;
+  // 入场动画还在跑的时候别抢：那会儿 transform 归 keyframes 管，拖了也不跟手
+  if (card.getAnimations?.().some((a) => a.playState === 'running')) return;
+
+  const scroller = card.querySelector('.modal-body, .detail-body, .action-list');
+  const t = e.touches[0];
+  const inTop = t.clientY - card.getBoundingClientRect().top <= DRAWER_TOP_ZONE;
+  // 表单控件上往下拽多半是想选中文字，只在滚到顶的空白区域才接管
+  if (!inTop && (!scroller || scroller.scrollTop > 0)) return;
+  if (!inTop && e.target.closest?.('input, textarea, select, [contenteditable="true"]')) return;
+
+  const now = performance.now();
+  drawerDrag = {
+    card, scroller,
+    host: card.closest('.modal'),          // 弹窗本体：模糊在它身上，拖拽期间要摘掉
+    scrim: drawerScrimOf(card),
+    x0: t.clientX, y0: t.clientY, dx: 0, dy: 0, y: 0,
+    active: false, inTop,
+    t0: now, trail: [{ y: 0, t: now }],
+    h: card.offsetHeight || 320,
+  };
+}, { passive: true });
+
+document.addEventListener('touchmove', (e) => {
+  const g = drawerDrag;
+  if (!g) return;
+
+  // 多指（另一只手搭上来 / 系统手势抢走）：这次不拉了，按「取消」弹回去。
+  // 绝不能只把 drawerDrag 置空——那样卡片和遮罩就永远停在半路
+  if (e.touches.length !== 1) { drawerEnd(true); return; }
+
+  const t = e.touches[0];
+  g.dy = t.clientY - g.y0;
+  g.dx = t.clientX - g.x0;
+
+  if (!g.active) {
+    // 还没进入拖拽，此时没有任何内联样式，直接放手是安全的
+    if (g.dy < -DRAWER_DEAD) { drawerDrag = null; return; }        // 往上推 → 交给滚动
+    if (g.dy < DRAWER_DEAD) return;                                // 还没走够，先不动
+    if (Math.abs(g.dx) > g.dy) { drawerDrag = null; return; }      // 横向手势
+    if (!g.inTop && g.scroller && g.scroller.scrollTop > 0) { drawerDrag = null; return; }
+    g.active = true;
+    g.card.classList.add('is-dragging');
+    g.scrim?.classList.add('is-dragging');
+    g.host?.classList.add('is-dragging');
+  }
+
+  e.preventDefault();
+  // 一次 touchmove 只记数字，真正写样式留到下一帧（多次合并成一次）
+  if (!drawerRaf) drawerRaf = requestAnimationFrame(drawerFrame);
+}, { passive: false });
+
+function drawerEnd(canceled = false) {
+  const g = drawerDrag;
+  drawerDrag = null;
+  if (drawerRaf) { cancelAnimationFrame(drawerRaf); drawerRaf = 0; }
+  if (!g) return;
+
+  const card = g.card;
+  // 只是点了一下、没真正进入拖拽：没有内联样式要回滚
+  if (!g.active) { g.scrim?.classList.remove('is-dragging'); return; }
+
+  // 速度只看最近 90ms：先按住停一会儿再甩，整段平均下来会被算成龟速
+  const now = performance.now();
+  // 抬得比一帧还快时 drawerFrame 可能还没跑过，用当前位移兜底
+  if (!g.y) g.y = Math.min(g.dy, g.h);
+  while (g.trail.length > 1 && now - g.trail[0].t > 90) g.trail.shift();
+  const tail = g.trail[0];
+  const v = (g.y - tail.y) / Math.max(16, now - tail.t);
+  const close = !canceled && (g.dy > DRAWER_DISMISS || (g.dy > 32 && v > DRAWER_FLICK));
+
+  // 先摘 is-dragging（它带 transition:none !important），再写内联过渡：
+  // 这一帧的起点就是手指当前的位置，动作不会跳
+  card.classList.remove('is-dragging');
+  g.scrim?.classList.remove('is-dragging');
+  g.host?.classList.remove('is-dragging');
+  card.style.transition = `transform ${close ? 200 : 240}ms cubic-bezier(.32,.72,0,1)`;
+
+  if (close) {
+    card.style.transform = `translate3d(0, ${g.h}px, 0)`;
+    drawerFade(g, 1);
+  } else {
+    card.style.transform = '';
+    drawerFade(g, 0);           // 遮罩回到全黑（走它自己的过渡）
+  }
+
+  const epoch = {};
+  // 给这张卡打上「这一轮关闭」的标记：200ms 内被重新打开时 resetDrawer 会把它抹掉
+  card._closeToken = epoch;
+  drawerAfter(card, close ? 200 : 240, () => {
+    if (card._closeToken !== epoch) return;      // 期间被重新打开了，样式已经归新的那次管
+    card._closeToken = null;
+    if (drawerDrag && drawerDrag.card === card) return; // 期间又开始拖它了
+    if (close) drawerClose(card);
+    resetDrawer(g.host, card, g.scrim);
+  });
+}
+document.addEventListener('touchend', () => drawerEnd());
+document.addEventListener('touchcancel', () => drawerEnd(true));
+
+function confirmDialog({ title, desc, okText, extraText, danger = true }) {
   return new Promise((resolve) => {
     $('#confirmTitle').textContent = title;
     $('#confirmDesc').textContent = desc || '';
     const ok = $('#confirmOk');
-    ok.textContent = okText;
+    ok.textContent = okText || tr('确定');
     ok.className = `btn ${danger ? 'btn-danger' : 'btn-primary'}`;
     const foot = ok.parentElement;
     $$('[data-extra]', foot).forEach((n) => n.remove());
@@ -2477,13 +3009,13 @@ function pathOptions() {
   };
 
   // 默认路径置顶，其次是最近用过的，最后是种子库里常用的目录
-  push(def, '默认路径', '默认', true);
-  readPathHistory().forEach((p) => push(p, '最近使用', stats.get(p)?.count ? `${stats.get(p).count}` : ''));
+  push(def, tr('默认路径'), tr('默认'), true);
+  readPathHistory().forEach((p) => push(p, tr('最近使用'), stats.get(p)?.count ? `${stats.get(p).count}` : ''));
   [...stats.values()]
     .filter((e) => !seen.has(e.path))
     .sort((a, b) => b.count - a.count || b.last - a.last)
     .slice(0, 8)
-    .forEach((e) => push(e.path, '常用目录', `${e.count}`));
+    .forEach((e) => push(e.path, tr('常用目录'), `${e.count}`));
 
   return opts;
 }
@@ -2508,7 +3040,7 @@ function updatePathHint() {
   if (!p) { hint.textContent = ''; return; }
   const def = trimPath(state.prefs?.save_path);
   const st = pathStats().get(p);
-  hint.textContent = def && p === def ? '默认路径' : st ? `已存 ${st.count} 个种子` : '新目录';
+  hint.textContent = def && p === def ? tr('默认路径') : st ? tr('已存 {n} 个种子', { n: st.count }) : tr('新目录');
 }
 
 function positionPathMenu() {
@@ -2558,12 +3090,12 @@ function renderPathMenu() {
   if (!list.length) {
     const typed = trimPath($('#addPath').value);
     listEl.innerHTML = `<div class="path-empty">
-      <span>${all.length ? '没有匹配的历史目录' : '还没有历史目录'}</span>
+      <span>${esc(all.length ? tr('没有匹配的历史目录') : tr('还没有历史目录'))}</span>
       ${typed ? `<button class="path-use" type="button" data-path="${esc(typed)}">
-        <svg><use href="#i-folder"/></svg>使用该路径
+        <svg><use href="#i-folder"/></svg>${esc(tr('使用该路径'))}
       </button><small>${esc(typed)}</small>` : ''}
     </div>`;
-    footEl.innerHTML = typed ? '<span>按 <kbd>↵</kbd> 直接使用当前路径</span>' : '';
+    footEl.innerHTML = typed ? `<span>${tr('按 <kbd>↵</kbd> 直接使用当前路径')}</span>` : '';
     pathMenuState.active = -1;
     return;
   }
@@ -2587,9 +3119,9 @@ function renderPathMenu() {
   listEl.innerHTML = html;
 
   footEl.innerHTML =
-    `<span class="path-kbd"><kbd>↑</kbd><kbd>↓</kbd> 选择 · <kbd>↵</kbd> 确认</span>` +
+    `<span class="path-kbd">${tr('<kbd>↑</kbd><kbd>↓</kbd> 选择 · <kbd>↵</kbd> 确认')}</span>` +
     (readPathHistory().length
-      ? `<button class="path-clear" type="button" id="pathClear"><svg><use href="#i-trash"/></svg>清除最近</button>`
+      ? `<button class="path-clear" type="button" id="pathClear"><svg><use href="#i-trash"/></svg>${esc(tr('清除最近'))}</button>`
       : '<span></span>');
 
   requestAnimationFrame(() => {
@@ -2694,7 +3226,7 @@ $('#pathMenu').addEventListener('click', (e) => {
     renderPathMenu();
     positionPathMenu();
     updatePathHint();
-    toast('已清除路径历史');
+    toast(tr('已清除路径历史'));
     return;
   }
   const use = e.target.closest('.path-use');
@@ -2755,10 +3287,10 @@ function shortName(name, max = 40) {
 
 /** 已选文件的提示文案：多选只报第一个名字，个数由前缀说明，全名留在 title 里 */
 function dropHintOf(files) {
-  if (!files.length) return '点击选择或拖入 .torrent 文件'; // 取消选择也要回到初始态
+  if (!files.length) return tr('点击选择或拖入 .torrent 文件'); // 取消选择也要回到初始态
   // 多选时再压短一点，免得「已选择 N 个文件：」加名字之后尾巴孤零零折一行
   const first = shortName(files[0].name, files.length > 1 ? 30 : 40);
-  return `已选择 ${files.length} 个文件：${first}`;
+  return tr('已选择 {n} 个文件：{name}', { n: files.length, name: first });
 }
 
 /** 把已选文件写进拖拽框：文案截断，title 里放全名 */
@@ -2830,6 +3362,8 @@ let addCoverFile = null;
 let addCoverUrl = null;
 /* 添加框里刮到的海报：此时种子还没进 qBittorrent，没有 hash，等添加完再按 hash 落盘 */
 let addTvdb = null;
+let addCands = [];    // 不敢确定是哪一部时列出来的候选作品（和详情页那列一样）
+let addCandSel = -1;  // 候选里选中的第几条（右边简介跟着它走）
 let addTvdbBusy = false;
 let addScrapeSeq = 0; // 每发起一次刮削 +1，回来的旧结果直接丢掉
 
@@ -2838,18 +3372,27 @@ function resetAddCover() {
   addScrapeSeq++;
   addCoverFile = null;
   addTvdb = null;
+  addCands = [];
+  addCandSel = -1;
   if (addCoverUrl) URL.revokeObjectURL(addCoverUrl);
   addCoverUrl = null;
   const box = $('#addCoverBox');
   box.classList.remove('has-img');
   box.innerHTML = '<svg><use href="#i-image"/></svg>';
   $('#addCoverClear').hidden = true;
-  setCoverHint('可选');
-  $('#addCoverTitle').textContent = '不设置也可以';
-  $('#addCoverDesc').textContent = '默认用种子目录里的图片，没有就显示类型图标；也可以在下面直接粘一张';
-  $('#addScrapeLabel').textContent = '刮削封面';
+  setCoverHint(tr('可选'));
+  $('#addCoverTitle').textContent = tr('不设置也可以');
+  $('#addCoverDesc').textContent = tr('默认用种子目录里的图片，没有就显示类型图标；也可以在下面直接粘一张');
+  $('#addScrapeLabel').textContent = tr('刮削封面');
   $('#addArts').hidden = true;
   $('#addArts').innerHTML = '';
+  $('#addSplit').hidden = true;
+  $('#addSplit').closest('.modal-card')?.classList.remove('is-wide');
+  $('#addCands').innerHTML = '';
+  $('#addSide').hidden = true;
+  $('#addSide').innerHTML = '';
+  const hint = $('#addCandsHint');
+  if (hint) { hint.hidden = true; hint.textContent = ''; }
   clearAddKwHint();
   const input = $('#addCoverFile');
   if (input) input.value = '';
@@ -2950,11 +3493,11 @@ function renderAddKwHint(got) {
   const hint = $('#addKwHint');
   if (!hint) return;
   const p = got.parsed || {};
-  const extra = `${p.year ? ` ${p.year}` : ''}${p.season ? ` 第${p.season}季` : ''}`;
+  const extra = `${p.year ? ` ${p.year}` : ''}${p.season ? tr(' 第{n}季', { n: p.season }) : ''}`;
   const title = `<b>${esc(p.title)}</b>${esc(extra)}`;
   hint.innerHTML = got.from === 'file'
-    ? `按种子里的 <b>${esc(clipLabel(got.name, 34))}</b> 认作 ${title}，不对可以直接改`
-    : `已从种子名识别为 ${title}，不对可以直接改`;
+    ? tr('按种子里的 {file} 认作 {title}，不对可以直接改', { file: `<b>${esc(clipLabel(got.name, 34))}</b>`, title })
+    : tr('已从种子名识别为 {title}，不对可以直接改', { title });
   hint.hidden = false;
 }
 
@@ -2991,19 +3534,153 @@ function showAddPoster(image) {
   box.classList.add('has-img');
 }
 
+/* 候选海报：和详情页「TheTVDB 刮削」共用 .cover-grid / .cover-item / .tvdb-cap，
+   两边看到的是同一种卡片（同样的圆角、悬浮、底部「海报 · 语言」标签）。
+   唯一多出来的是 is-on：添加时还没落盘，得让人看出当前选的是哪一张。 */
 function renderAddArts(arts, current) {
   const wrap = $('#addArts');
   if (!arts.length) { wrap.hidden = true; wrap.innerHTML = ''; return; }
-  wrap.innerHTML = arts.map((a) => `
-    <button class="add-art ${a.image === current ? 'is-on' : ''}" type="button" data-image="${esc(a.image)}"
-      title="${esc(a.kind === 'backdrop' ? '背景图' : '海报')} · ${esc(a.lang || '—')}">
+  wrap.innerHTML = arts.map((a, i) => `
+    <button class="cover-item tvdb-item cover-add-item ${a.image === current ? 'is-on' : ''}" type="button" data-image="${esc(a.image)}"
+      title="${esc(tr('海报 {n}', { n: i + 1 }))}${a.kind === 'backdrop' ? esc(tr('（背景图）')) : ''}">
       <img src="${esc(a.thumb || a.image)}" data-full="${esc(a.image)}" alt="" loading="lazy" decoding="async" referrerpolicy="no-referrer" />
+      <span class="tvdb-cap"><small>${esc(a.kind === 'backdrop' ? tr('背景图') : tr('海报'))} · ${esc(a.lang || '—')}</small></span>
     </button>`).join('');
   wrap.hidden = false;
   for (const img of $$('#addArts img[data-full]')) {
     img.addEventListener('error', () => {
       if (img.dataset.full && img.src !== img.dataset.full) img.src = img.dataset.full;
     }, { once: true });
+  }
+}
+
+/**
+ * 不敢确定是哪一部时，摆成和封面弹窗一模一样的双栏：
+ * 左边 .tvdb-row 逐条列片名 / 年份 / 类型，右边是选中那条的**.tvdb-side**（大海报 +
+ * 片名 + 类型年份 + 简介 + 两个动作）。看简介挑片子比认缩略图靠谱，这也是详情页当初
+ * 把海报格子改成双栏的原因，添加弹窗没必要再走一遍回头路。
+ * 与详情页唯一的差别：那里两次才出结果（先看简介、再点「看它的海报」展开网格），
+ * 这里两个按钮直接给结论——一个把它的全部海报铺到下面慢慢挑，一个就用搜索结果这张。
+ */
+function renderAddCands(items, hint = '') {
+  addCands = items || [];
+  const list = $('#addCands');
+  const split = $('#addSplit');
+  const hintEl = $('#addCandsHint');
+  if (hintEl) {
+    hintEl.textContent = addCands.length ? hint : '';
+    hintEl.hidden = !hint || !addCands.length;
+  }
+  if (!addCands.length) { addCandClose(); return; }
+  list.innerHTML = addCands.map((it, i) => `
+    <button class="tvdb-row" type="button" role="option" aria-selected="false" data-i="${i}">
+      <span class="tvdb-row-pic">${it.image
+        ? `<img src="${esc(it.image)}" alt="" loading="lazy" decoding="async" referrerpolicy="no-referrer" />`
+        : '<svg><use href="#i-image"/></svg>'}</span>
+      <span class="tvdb-row-txt">
+        <b>${esc(it.name)}</b>
+        <small>${esc(it.type === 'movie' ? tr('电影') : tr('剧集'))}${it.year ? ` · ${esc(it.year)}` : ''}${it.nameEn && it.nameEn !== it.name ? ` · ${esc(it.nameEn)}` : ''}</small>
+      </span>
+    </button>`).join('');
+  split.hidden = false;
+  // 双栏要横向空间：候选期间把添加弹窗临时加宽，收起时再还原
+  split.closest('.modal-card')?.classList.add('is-wide');
+  addCandSelect(addCands[addCandSel] ? addCandSel : 0);
+}
+
+/** 收起候选双栏，顺便把临时加宽的宽度还原 */
+function addCandClose() {
+  addCands = [];
+  addCandSel = -1;
+  const split = $('#addSplit');
+  if (split) {
+    split.hidden = true;
+    split.closest('.modal-card')?.classList.remove('is-wide');
+  }
+  $('#addCands').innerHTML = '';
+  $('#addSide').hidden = true;
+  $('#addSide').innerHTML = '';
+}
+
+/** 选中列表里的某一条：高亮 + 右边换成它的简介 */
+function addCandSelect(i) {
+  const it = addCands[i];
+  addCandSel = it ? i : -1;
+  for (const row of $$('#addCands .tvdb-row')) {
+    const on = Number(row.dataset.i) === addCandSel;
+    row.classList.toggle('is-on', on);
+    row.setAttribute('aria-selected', String(on));
+  }
+  addRenderSide(it || null);
+}
+
+/** 右栏：大海报 + 片名 + 类型年份 + 简介 + 两个动作（与详情页 tvdbRenderSide 同一套类名） */
+function addRenderSide(it) {
+  const side = $('#addSide');
+  if (!it) { side.hidden = true; side.innerHTML = ''; return; }
+  const meta = [
+    it.type === 'movie' ? tr('电影') : tr('剧集'),
+    it.year || '',
+    it.nameEn && it.nameEn !== it.name ? it.nameEn : '',
+  ].filter(Boolean).join(' · ');
+  side.hidden = false;
+  side.innerHTML = `
+    <div class="tvdb-side-pic">${it.image
+      ? `<img src="${esc(it.image)}" alt="" loading="lazy" decoding="async" referrerpolicy="no-referrer" />`
+      : '<svg><use href="#i-image"/></svg>'}</div>
+    <div class="tvdb-side-body">
+      <h3 class="tvdb-side-title">${esc(it.name)}</h3>
+      <p class="tvdb-side-meta">${esc(meta)}</p>
+      <p class="tvdb-side-desc${it.overview ? '' : ' is-empty'}">${it.overview
+        ? esc(it.overview)
+        : esc(tr('TheTVDB 上没有简介，点开海报看看对不对得上也一样。'))}</p>
+      <div class="tvdb-side-acts">
+        <button class="btn btn-primary btn-sm" data-act="posters"><svg><use href="#i-image"/></svg>${esc(tr('看它的海报'))}</button>
+        <button class="btn btn-soft btn-sm" data-act="apply"><svg><use href="#i-check"/></svg>${esc(tr('就用这张'))}</button>
+      </div>
+    </div>`;
+}
+
+/** 拉过的海报列表留一份：同一部作品来回点不再联网（TVDB 按请求计额度） */
+const addArtsCache = new Map();
+
+async function addArtsFor(it) {
+  const key = `${it.type}:${it.id}`;
+  if (addArtsCache.has(key)) return addArtsCache.get(key);
+  const res = await fetch(`/__cover/tvdb/art?id=${encodeURIComponent(it.id)}&type=${encodeURIComponent(it.type)}`);
+  const data = await res.json().catch(() => ({}));
+  if (!res.ok) throw new Error(data.message || tr('读取失败'));
+  const arts = (data.items || []).filter((a) => a.image);
+  addArtsCache.set(key, arts);
+  return arts;
+}
+
+/** 选定一部作品当「添加后的封面」；art=true 时把它的全部海报也铺进网格供挑选 */
+async function addUseTitle(it, { art = false } = {}) {
+  const my = addScrapeSeq; // 拉海报期间又发起了一次刮削，这次的结果就别覆盖上去了
+  addCoverFile = null; // 选定作品就作废之前手动选的图
+  addTvdb = { id: it.id, type: it.type, image: it.image || '', name: it.name, nameEn: it.nameEn || '', year: it.year || '' };
+  if (it.image) showAddPoster(it.image);
+  $('#addCoverTitle').textContent = titled(it.name) + (it.year ? ` (${it.year})` : '');
+  $('#addCoverDesc').textContent = tr('来自 TheTVDB，添加后自动套用；想换一张点下面任意一张');
+  $('#addCoverClear').hidden = false;
+  renderAddArts([], '');
+  setCoverHint(it.type === 'movie' ? tr('电影') : tr('剧集'), it.name);
+  if (!art) return;
+  setCoverHint(tr('读取《{name}》的海报…', { name: it.name }), it.name);
+  try {
+    const arts = await addArtsFor(it);
+    if (my !== addScrapeSeq) return; // 已经按新的关键词重搜过了
+    const image = (arts.find((a) => a.kind === 'poster') || arts[0])?.image || it.image || '';
+    if (!image) throw new Error(tr('这部作品在 TheTVDB 上还没有海报'));
+    addTvdb.image = image;
+    showAddPoster(image);
+    renderAddArts(arts, image);
+  } catch (err) {
+    if (my !== addScrapeSeq) return;
+    renderAddArts([], '');
+    setCoverHint(tr('读取失败'));
+    toast(err.message, 'err');
   }
 }
 
@@ -3021,20 +3698,21 @@ async function scrapeAddCover({ auto = false } = {}) {
   if (auto && addCoverFile) return;
   const name = addKeyword();
   if (!name) {
-    if (!auto) toast(addMode === 'link' ? '先粘贴 magnet 或链接，或直接填个关键词' : '先选择 .torrent 文件，或直接填个关键词', 'err');
+    if (!auto) toast(addMode === 'link' ? tr('先粘贴 magnet 或链接，或直接填个关键词') : tr('先选择 .torrent 文件，或直接填个关键词'), 'err');
     return;
   }
   if (!state.tvdb.enabled || !state.tvdb.configured) {
-    if (!auto) toast('先到「设置 → TheTVDB 刮削」里启用并填上 API Key', 'err');
+    if (!auto) toast(tr('先到「设置 → TheTVDB 刮削」里启用并填上 API Key'), 'err');
     return;
   }
   if (!auto && addCoverFile) resetAddCover(); // 手动点了刮削，就用刮削的替换掉自定义图
   const my = ++addScrapeSeq;
+  renderAddCands([]); // 上一次的候选先收起来，免得和新结果混在一起
   addTvdbBusy = true;
   const btn = $('#addScrapeBtn');
   btn.classList.add('is-busy');
-  $('#addScrapeLabel').textContent = '刮削中…';
-  setCoverHint(`搜索「${shortName(name, 24)}」…`, name);
+  $('#addScrapeLabel').textContent = tr('刮削中…');
+  setCoverHint(tr('搜索「{name}」…', { name: shortName(name, 24) }), name);
   try {
     const qs = new URLSearchParams({ name });
     // 关键词还是解析出来那个时，把年份 / 类型一起带上——名字洗干净的同时别把 1999、S02 这些信息弄丢
@@ -3046,52 +3724,76 @@ async function scrapeAddCover({ auto = false } = {}) {
     const data = await res.json().catch(() => ({}));
     if (my !== addScrapeSeq) return; // 期间又搜了一次，这次结果作废
     if (addCoverFile) return; // 刮削期间用户改用手动选图了
-    if (!res.ok) throw new Error(data.message || '刮削失败');
+    if (!res.ok) throw new Error(data.message || tr('刮削失败'));
     if (!data.ok) {
-      setCoverHint('没匹配到');
-      if (!auto) {
+      // 没把握是哪一部：和详情页一样把候选摆出来让人挑，而不是丢一句「没匹配到」了事
+      const items = data.items || [];
+      renderAddCands(items, items.length ? tr('不敢确定是哪一部，看简介挑一部') : '');
+      setCoverHint(tr('没匹配到'));
+      if (!auto && !items.length) {
         toast(data.reason === 'low-score'
-          ? '没把握是哪一部，把关键词改得更准一点再试，也可以点「选择图片」手动设'
-          : 'TheTVDB 上没找到这部作品，换个关键词再试，也可以点「选择图片」手动设', 'err');
+          ? tr('没把握是哪一部，把关键词改得更准一点再试，也可以点「选择图片」手动设')
+          : tr('TheTVDB 上没找到这部作品，换个关键词再试，也可以点「选择图片」手动设'), 'err');
       }
       return;
     }
+    renderAddCands([]);
     const pick = data.pick || {};
     const arts = (data.arts || []).filter((a) => a.image);
     const image = (arts.find((a) => a.kind === 'poster') || arts[0])?.image || pick.image || '';
-    if (!image) throw new Error('这部作品在 TheTVDB 上没有可用海报');
+    if (!image) throw new Error(tr('这部作品在 TheTVDB 上没有可用海报'));
     addTvdb = {
       id: pick.id, type: pick.type, image,
       name: pick.name || '', nameEn: pick.nameEn || '', year: pick.year || '',
     };
     showAddPoster(image);
     renderAddArts(arts, image);
-    $('#addCoverTitle').textContent = `《${pick.name}》${pick.year ? ` (${pick.year})` : ''}`;
-    $('#addCoverDesc').textContent = '来自 TheTVDB，添加后自动套用；想换一张点下面任意一张';
-    setCoverHint(pick.type === 'movie' ? '电影' : '剧集');
+    $('#addCoverTitle').textContent = titled(pick.name) + (pick.year ? ` (${pick.year})` : '');
+    $('#addCoverDesc').textContent = tr('来自 TheTVDB，添加后自动套用；想换一张点下面任意一张');
+    setCoverHint(pick.type === 'movie' ? tr('电影') : tr('剧集'));
     $('#addCoverClear').hidden = false;
-    toast(`已匹配《${pick.name}》，添加后自动套用海报`, 'ok');
+    toast(tr('已匹配《{name}》，添加后自动套用海报', { name: pick.name }), 'ok');
   } catch (err) {
     if (my !== addScrapeSeq) return;
-    setCoverHint('刮削失败');
+    setCoverHint(tr('刮削失败'));
     if (!auto) toast(err.message, 'err');
   } finally {
     if (my === addScrapeSeq) {
       addTvdbBusy = false;
       btn.classList.remove('is-busy');
-      $('#addScrapeLabel').textContent = '刮削封面';
+      $('#addScrapeLabel').textContent = tr('刮削封面');
     }
   }
 }
 
 $('#addScrapeBtn').addEventListener('click', () => scrapeAddCover());
+/* 候选列表：先选中看简介，再点一次（或点右栏按钮）才出海报 —— 与详情页同一套手感 */
+$('#addCands').addEventListener('click', (e) => {
+  const row = e.target.closest('.tvdb-row');
+  if (!row) return;
+  const i = Number(row.dataset.i);
+  const it = addCands[i];
+  if (!it) return;
+  if (i === addCandSel) addUseTitle(it, { art: true });
+  else addCandSelect(i);
+});
+
+$('#addSide').addEventListener('click', (e) => {
+  const btn = e.target.closest('[data-act]');
+  if (!btn) return;
+  const it = addCands[addCandSel];
+  if (!it) return;
+  // 「看它的海报」把这部作品的海报全铺到下面慢慢挑；「就用这张」直接用搜索结果里那张，不再联网
+  addUseTitle(it, { art: btn.dataset.act === 'posters' });
+});
+
 $('#addArts').addEventListener('click', (e) => {
   const item = e.target.closest('[data-image]');
   if (!item) return;
   const image = item.dataset.image;
   if (addTvdb) addTvdb.image = image;
   showAddPoster(image);
-  $$('#addArts .add-art').forEach((el) => el.classList.toggle('is-on', el === item));
+  $$('#addArts .cover-item').forEach((el) => el.classList.toggle('is-on', el === item));
 });
 
 $('#addCoverBtn').addEventListener('click', () => $('#addCoverFile').click());
@@ -3104,19 +3806,23 @@ $('#addCoverFile').addEventListener('change', (e) => {
 /** 设置「添加后要用的自定义封面」：选文件、粘贴、拖进来都走这里 */
 function setAddCoverFile(file) {
   if (!file) return false;
-  if (!/^image\//.test(file.type)) { toast('请选择图片文件', 'err'); return false; }
-  if (file.size > 8 * 1024 * 1024) { toast('图片请控制在 8MB 以内', 'err'); return false; }
+  if (!/^image\//.test(file.type)) { toast(tr('请选择图片文件'), 'err'); return false; }
+  if (file.size > 8 * 1024 * 1024) { toast(tr('图片请控制在 8MB 以内'), 'err'); return false; }
+  // 自定义图优先：还在飞的刮削作废（体会回头又把海报盖上来），结果区一并收起
+  addScrapeSeq++;
   addCoverFile = file;
-  addTvdb = null; // 自定义图优先，刮削结果作废
+  addTvdb = null;
   if (addCoverUrl) URL.revokeObjectURL(addCoverUrl);
   addCoverUrl = URL.createObjectURL(file);
   const box = $('#addCoverBox');
   box.innerHTML = `<img src="${addCoverUrl}" alt="" />`;
   box.classList.add('has-img');
   $('#addCoverClear').hidden = false;
-  setCoverHint(shortName(file.name, 24) || '已粘贴的图片', file.name || '');
-  $('#addCoverTitle').textContent = '自定义图片';
-  $('#addCoverDesc').textContent = '添加后按这张设置；想换回刮削的海报点「刮削封面」';
+  setCoverHint(shortName(file.name, 24) || tr('已粘贴的图片'), file.name || '');
+  $('#addCoverTitle').textContent = tr('自定义图片');
+  $('#addCoverDesc').textContent = tr('添加后按这张设置；想换回刮削的海报点「刮削封面」');
+  addScrapeSeq++;
+  addCandClose();
   $('#addArts').hidden = true;
   $('#addArts').innerHTML = '';
   return true;
@@ -3219,7 +3925,7 @@ function bindPasteBox(el, apply) {
     const img = el.querySelector('img');
     if (img) {
       const src = img.currentSrc || img.src;
-      el.innerHTML = '<span class="paste-busy">正在读取图片…</span>';
+      el.innerHTML = `<span class="paste-busy">${esc(tr('正在读取图片…'))}</span>`;
       const file = await fileFromSrc(src);
       if (!take(file)) el.innerHTML = '';
       return;
@@ -3239,7 +3945,7 @@ function bindPasteBox(el, apply) {
 }
 
 bindPasteBox($('#coverPasteInput'), (file) => {
-  if (!coverHash) { toast('先选中一个种子', 'err'); return; }
+  if (!coverHash) { toast(tr('先选中一个种子'), 'err'); return; }
   uploadCoverFile(coverHash, file).then((ok) => { if (ok) toast('已粘贴封面', 'ok'); });
 });
 bindPasteBox($('#addPasteInput'), (file) => {
@@ -3250,8 +3956,8 @@ $('#addCoverClear').addEventListener('click', resetAddCover);
 
 function fillCategorySelect() {
   const sel = $('#addCategory');
-  const cats = Object.keys(state.categories || {}).sort((a, b) => a.localeCompare(b, 'zh-CN'));
-  sel.innerHTML = `<option value="">默认分类</option>` + cats.map((c) => `<option value="${esc(c)}">${esc(c)}</option>`).join('');
+  const cats = Object.keys(state.categories || {}).sort((a, b) => a.localeCompare(b, localeTag()));
+  sel.innerHTML = `<option value="">${esc(tr('默认分类'))}</option>` + cats.map((c) => `<option value="${esc(c)}">${esc(c)}</option>`).join('');
 }
 
 $('#addSubmit').addEventListener('click', async () => {
@@ -3259,8 +3965,8 @@ $('#addSubmit').addEventListener('click', async () => {
   const fd = new FormData();
   const urls = $('#addUrls').value.trim();
 
-  if (addMode === 'link' && !urls) { toast('请粘贴 magnet 或链接', 'err'); return; }
-  if (addMode === 'file' && !addFiles.length) { toast('请选择 .torrent 文件', 'err'); return; }
+  if (addMode === 'link' && !urls) { toast(tr('请粘贴 magnet 或链接'), 'err'); return; }
+  if (addMode === 'file' && !addFiles.length) { toast(tr('请选择 .torrent 文件'), 'err'); return; }
 
   if (addMode === 'link') fd.append('urls', urls);
   else addFiles.forEach((f) => fd.append('torrents', f, f.name));
@@ -3275,20 +3981,20 @@ $('#addSubmit').addEventListener('click', async () => {
   fd.append('sequentialDownload', $('#addSeq').checked ? 'true' : 'false');
 
   btn.disabled = true;
-  btn.textContent = '添加中…';
+  btn.textContent = tr('添加中…');
   const before = new Set(state.map.keys());
   // 种子名先留一份：添加成功后列表里才有真名，这里先用它给类型兜底
   const hintName = addMode === 'link' ? (urls.split('\n')[0] || '').trim() : (addFiles[0]?.name || '');
   try {
     const res = await api('/torrents/add', { method: 'POST', body: fd });
-    if (/fail/i.test(res)) throw new Error('qBittorrent 拒绝了该种子');
+    if (/fail/i.test(res)) throw new Error(tr('qBittorrent 拒绝了该种子'));
     closeModal('addModal');
     if (path) rememberPath(path);
     $('#addUrls').value = '';
     $('#addTags').value = '';
     addFiles = [];
     renderDropText(addFiles);
-    toast('已添加到下载队列', 'ok');
+    toast(tr('已添加到下载队列'), 'ok');
     refreshNow();
     // 新种子一出现就把类型写进缓存（后台跑，不挡界面）；带封面时顺便等它拿到新 hash
     const wantTvdb = addCoverFile ? null : addTvdb; // 手动选的图优先于刮削
@@ -3303,18 +4009,18 @@ $('#addSubmit').addEventListener('click', async () => {
     if (addCoverFile) {
       const fresh = pending ? await pending : await waitNewHashes(before);
       if (!fresh.length) {
-        toast('没找到刚添加的种子，封面未设置', 'err');
+        toast(tr('没找到刚添加的种子，封面未设置'), 'err');
       } else {
         const file = addCoverFile;
         const done = await Promise.all(fresh.map((h) => uploadCoverFile(h, file, true)));
-        if (done.some(Boolean)) toast('封面已设置', 'ok');
+        if (done.some(Boolean)) toast(tr('封面已设置'), 'ok');
         renderRows();
       }
       resetAddCover();
     } else if (wantTvdb) {
       const fresh = pending ? await pending : await waitNewHashes(before);
       if (!fresh.length) {
-        toast('没找到刚添加的种子，海报未套用', 'err');
+        toast(tr('没找到刚添加的种子，海报未套用'), 'err');
       } else {
         let done = 0;
         for (const h of fresh) {
@@ -3333,11 +4039,11 @@ $('#addSubmit').addEventListener('click', async () => {
           } catch { /* 一个失败不影响其它 */ }
         }
         if (done) {
-          toast(`已刮削《${wantTvdb.name}》的海报`, 'ok');
+          toast(tr('已刮削《{name}》的海报', { name: wantTvdb.name }), 'ok');
           renderRows();
           refreshMediaTitles();
         } else {
-          toast('海报套用失败', 'err');
+          toast(tr('海报套用失败'), 'err');
         }
       }
       resetAddCover();
@@ -3345,10 +4051,10 @@ $('#addSubmit').addEventListener('click', async () => {
       pending.catch(() => {});
     }
   } catch (err) {
-    toast(err.message || '添加失败', 'err');
+    toast(err.message || tr('添加失败'), 'err');
   } finally {
     btn.disabled = false;
-    btn.textContent = '开始下载';
+    btn.textContent = tr('开始下载');
   }
 });
 
@@ -3358,10 +4064,6 @@ $('#settingsBtn').addEventListener('click', openSettings);
 async function openSettings() {
   openModal('settingsModal');
   try {
-    const info = await fetch('/__state').then((r) => r.json());
-    $('#setTarget').value = info.target;
-    const lan = (info.lan || []).map((ip) => `http://${ip}:${info.port}`).join('  ·  ');
-    $('#setLanHint').textContent = lan ? `手机访问：${lan}` : '';
     const p = await loadPrefs();
     $('#setDlLimit').value = Math.round((p.dl_limit || 0) / 1024);
     $('#setUpLimit').value = Math.round((p.up_limit || 0) / 1024);
@@ -3372,6 +4074,12 @@ async function openSettings() {
     $('#setGlobalRatio').textContent = Number(s.global_ratio || 0).toFixed(2);
   } catch (err) { /* 忽略 */ }
   $('#setTheme').value = localStorage.getItem(LS.theme) || 'system';
+  const langSel = $('#setLang');
+  if (langSel) {
+    let savedLang = '';
+    try { savedLang = localStorage.getItem('qb.lang') || ''; } catch { /* 忽略 */ }
+    langSel.value = savedLang === 'zh' || savedLang === 'en' ? savedLang : '';
+  }
   $('#setInterval').value = String(state.pollMs);
   $('#setThumbs').checked = state.coverOn;
   const am = $('#setAddMode');
@@ -3387,8 +4095,14 @@ async function openSettings() {
     const d = window.__iosDebug;
     const cssV = (document.querySelector('link[rel="stylesheet"]')?.href.match(/[?&]v=([^&]+)/) || [])[1] || 'base';
     vp.textContent = d
-      ? `样式 ${cssV} · ${d.standalone ? 'PWA' : '浏览器'} · 视口 ${d.inner} · 屏幕 ${d.screen} · 安全区 上${d.safeTop}/下${d.safeBottom}`
-        + (d.deficit > 0 ? ` · 缺口${d.deficit}px已补偿` : ' · 无缺口')
+      ? tr('样式 {v} · {mode} · 视口 {inner} · 屏幕 {screen} · 安全区 上{top}/下{bottom}', {
+        v: cssV,
+        mode: d.standalone ? 'PWA' : tr('浏览器'),
+        inner: d.inner,
+        screen: d.screen,
+        top: d.safeTop,
+        bottom: d.safeBottom,
+      }) + (d.deficit > 0 ? tr(' · 缺口{n}px已补偿', { n: d.deficit }) : tr(' · 无缺口'))
       : '';
   }
 }
@@ -3397,12 +4111,17 @@ async function openSettings() {
 async function refreshCacheInfo() {
   const el = $('#setCacheInfo');
   if (!el) return;
-  el.textContent = '读取中…';
+  el.textContent = tr('读取中…');
   try {
     const s = await fetch('/__cover/cache').then((r) => r.json());
-    el.textContent = `目录扫描结果 ${s.scan} 个种子 · TVDB 海报 ${s.tvdb?.count || 0} 张 / ${fmtBytes(s.tvdb?.bytes || 0)}`
-      + ` · 目录图片 ${s.dirImages ?? s.images} 张 / ${fmtBytes(s.dirBytes ?? s.bytes)}`;
-  } catch { el.textContent = '读取失败'; }
+    el.textContent = tr('目录扫描结果 {n} 个种子 · TVDB 海报 {t} 张 / {tb} · 目录图片 {d} 张 / {db}', {
+      n: s.scan,
+      t: s.tvdb?.count || 0,
+      tb: fmtBytes(s.tvdb?.bytes || 0),
+      d: s.dirImages ?? s.images,
+      db: fmtBytes(s.dirBytes ?? s.bytes),
+    });
+  } catch { el.textContent = tr('读取失败'); }
 }
 
 /** 拉一次全量媒体名（TVDB 刮削结果，供列表标题显示），体积极小随便刷 */
@@ -3420,7 +4139,7 @@ async function refreshMediaTitles() {
 async function refreshTvdbInfo() {
   const info = $('#setTvdbInfo');
   if (!info) return;
-  info.textContent = '读取中…';
+  info.textContent = tr('读取中…');
   try {
     const st = await fetch('/__cover/tvdb/status').then((r) => r.json());
     Object.assign(state.tvdb, {
@@ -3430,22 +4149,25 @@ async function refreshTvdbInfo() {
     $('#setTvdbLang').value = st.lang || 'zho';
     $('#setTvdbAuto').value = st.auto || 'off';
     if (!$('#setTvdbKey').value) $('#setTvdbKey').value = '';
-    $('#setTvdbKey').placeholder = st.keyHint ? `已保存：${st.keyHint}` : 'thetvdb.com → Dashboard → API Keys';
-    $('#setTvdbKeyHint').textContent = st.hasEnvKey ? '来自环境变量' : st.configured ? '已配置' : '未配置';
+    $('#setTvdbKey').placeholder = st.keyHint ? tr('已保存：{k}', { k: st.keyHint }) : 'thetvdb.com → Dashboard → API Keys';
+    $('#setTvdbKeyHint').textContent = st.hasEnvKey ? tr('来自环境变量') : st.configured ? tr('已配置') : tr('未配置');
     const u = st.usage || {};
     const usageTxt = u.blockedUntil
-      ? ` · 已限流，${new Date(u.blockedUntil).toLocaleTimeString('zh-CN', { hour: '2-digit', minute: '2-digit' })} 后恢复`
-      : ` · 今日已调用 ${u.calls || 0} 次`;
+      ? tr(' · 已限流，{time} 后恢复', { time: new Date(u.blockedUntil).toLocaleTimeString(localeTag(), { hour: '2-digit', minute: '2-digit' }) })
+      : tr(' · 今日已调用 {n} 次', { n: u.calls || 0 });
     info.textContent = st.configured
-      ? `已配置 · 海报语言 ${st.lang || '不限'} · 自动刮削${st.auto === 'new' ? '：新加入的影视种子' : '：仅手动'}${usageTxt}`
-      : '还没填 API Key：去 thetvdb.com 登录 → Dashboard → API Keys 申请一个（免费的）';
-  } catch { info.textContent = '读取失败'; }
+      ? tr('已配置 · 海报语言 {lang} · 自动刮削{auto}', {
+        lang: st.lang || tr('不限'),
+        auto: st.auto === 'new' ? tr('：新加入的影视种子') : tr('：仅手动'),
+      }) + usageTxt
+      : tr('还没填 API Key：去 thetvdb.com 登录 → Dashboard → API Keys 申请一个（免费的）');
+  } catch { info.textContent = tr('读取失败'); }
 }
 
 $('#setTvdbSave').addEventListener('click', async () => {
   const btn = $('#setTvdbSave');
   btn.disabled = true;
-  btn.textContent = '测试中…';
+  btn.textContent = tr('测试中…');
   try {
     const res = await fetch('/__cover/tvdb/config', {
       method: 'POST',
@@ -3459,10 +4181,10 @@ $('#setTvdbSave').addEventListener('click', async () => {
       }),
     });
     const data = await res.json().catch(() => ({}));
-    if (!res.ok) throw new Error(data.message || '保存失败');
-    const t = await fetch('/__cover/tvdb/test', { method: 'POST' }).then((r) => r.json());
-    if (t.ok) toast(`TheTVDB 连接正常（${t.ms}ms）`, 'ok');
-    else toast(t.message || '连接失败，检查 API Key', 'err');
+    if (!res.ok) throw new Error(data.message || tr('保存失败'));
+    const t2 = await fetch('/__cover/tvdb/test', { method: 'POST' }).then((r) => r.json());
+    if (t2.ok) toast(tr('TheTVDB 连接正常（{ms}ms）', { ms: t2.ms }), 'ok');
+    else toast(t2.message || tr('连接失败，检查 API Key'), 'err');
     $('#setTvdbKey').value = '';
     $('#setTvdbPin').value = '';
     refreshTvdbInfo();
@@ -3470,7 +4192,7 @@ $('#setTvdbSave').addEventListener('click', async () => {
     toast(err.message, 'err');
   } finally {
     btn.disabled = false;
-    btn.textContent = '保存并测试';
+    btn.textContent = tr('保存并测试');
   }
 });
 
@@ -3481,7 +4203,7 @@ function scrapeStopped(finished = false) {
   if (tvdbScanEs) { tvdbScanEs.close(); tvdbScanEs = null; }
   const btn = $('#setTvdbScan');
   btn.disabled = false;
-  btn.innerHTML = '<svg><use href="#i-refresh"/></svg>刮削全部影视种子';
+  btn.innerHTML = `<svg><use href="#i-refresh"/></svg>${esc(tr('刮削全部影视种子'))}`;
   if (!finished) $('#tvdbScanBox').hidden = true;
 }
 
@@ -3491,11 +4213,11 @@ function scrapeUpdate(s) {
   const pct = s.total ? Math.min(100, Math.round((s.i / s.total) * 100)) : 0;
   $('#tvdbScanBar').style.width = `${pct}%`;
   $('#tvdbScanCount').textContent = `${s.i} / ${s.total}`;
-  $('#tvdbScanNow').textContent = s.name ? `正在刮：${s.name}` : '准备中…';
+  $('#tvdbScanNow').textContent = s.name ? tr('正在刮：{name}', { name: s.name }) : tr('准备中…');
   const bits = [];
-  if (s.done) bits.push(`成功 ${s.done}`);
-  if (s.skipped) bits.push(`跳过 ${s.skipped}`);
-  if (s.failed) bits.push(`没匹配 ${s.failed}`);
+  if (s.done) bits.push(tr('成功 {n}', { n: s.done }));
+  if (s.skipped) bits.push(tr('跳过 {n}', { n: s.skipped }));
+  if (s.failed) bits.push(tr('没匹配 {n}', { n: s.failed }));
   $('#tvdbScanStat').textContent = bits.join(' · ') || '—';
 }
 
@@ -3503,7 +4225,7 @@ function startTvdbScan() {
   if (tvdbScanEs) return;
   const btn = $('#setTvdbScan');
   btn.disabled = true;
-  btn.innerHTML = '<svg><use href="#i-refresh"/></svg>刮削中…';
+  btn.innerHTML = `<svg><use href="#i-refresh"/></svg>${esc(tr('刮削中…'))}`;
   const agg = { done: 0, skipped: 0, failed: 0, i: 0, total: 0 };
   const es = new EventSource('/__cover/tvdb/scan/stream');
   tvdbScanEs = es;
@@ -3511,7 +4233,7 @@ function startTvdbScan() {
     const d = JSON.parse(e.data || '{}');
     agg.total = d.total || 0;
     scrapeUpdate(agg);
-    if (!agg.total) { toast('没有可刮削的种子', 'err'); scrapeStopped(); }
+    if (!agg.total) { toast(tr('没有可刮削的种子'), 'err'); scrapeStopped(); }
   });
   es.addEventListener('item', (e) => {
     const d = JSON.parse(e.data || '{}');
@@ -3530,36 +4252,36 @@ function startTvdbScan() {
     refreshAllCovers();
     refreshMediaTitles();
     refreshCacheInfo();
-    $('#tvdbScanNow').textContent = d.cancelled ? '已停止' : '刮削完成';
+    $('#tvdbScanNow').textContent = d.cancelled ? tr('已停止') : tr('刮削完成');
     $('#tvdbScanBar').style.width = '100%';
     toast(d.cancelled
-      ? `已停止：完成 ${d.done} 个，跳过 ${d.skipped} 个，没匹配 ${d.failed} 个`
-      : `刮削完成：成功 ${d.done} 个，跳过 ${d.skipped} 个，没匹配上 ${d.failed} 个`, d.cancelled ? '' : 'ok');
+      ? tr('已停止：完成 {d} 个，跳过 {s} 个，没匹配 {f} 个', { d: d.done, s: d.skipped, f: d.failed })
+      : tr('刮削完成：成功 {d} 个，跳过 {s} 个，没匹配上 {f} 个', { d: d.done, s: d.skipped, f: d.failed }), d.cancelled ? '' : 'ok');
     btn.disabled = false;
-    btn.innerHTML = '<svg><use href="#i-refresh"/></svg>刮削全部影视种子';
+    btn.innerHTML = `<svg><use href="#i-refresh"/></svg>${esc(tr('刮削全部影视种子'))}`;
     setTimeout(() => { $('#tvdbScanBox').hidden = true; }, 2500);
   });
   es.addEventListener('busy', () => {
     es.close();
     tvdbScanEs = null;
-    toast('已经有一个刮削任务在跑了', 'err');
+    toast(tr('已经有一个刮削任务在跑了'), 'err');
     btn.disabled = false;
-    btn.innerHTML = '<svg><use href="#i-refresh"/></svg>刮削全部影视种子';
+    btn.innerHTML = `<svg><use href="#i-refresh"/></svg>${esc(tr('刮削全部影视种子'))}`;
   });
   es.addEventListener('error', (e) => {
     // 服务端推的 error 事件带 message；连接断开时 e.data 为空，交给 onerror 处理
-    const msg = e.data ? (JSON.parse(e.data || '{}').message || '刮削失败') : null;
+    const msg = e.data ? (JSON.parse(e.data || '{}').message || tr('刮削失败')) : null;
     if (msg) { toast(msg, 'err'); scrapeStopped(); }
   });
-  es.onerror = () => { if (tvdbScanEs) { toast('刮削中断（连接已断开）', 'err'); scrapeStopped(); } };
+  es.onerror = () => { if (tvdbScanEs) { toast(tr('刮削中断（连接已断开）'), 'err'); scrapeStopped(); } };
 }
 
 $('#setTvdbScan').addEventListener('click', async () => {
   if (tvdbScanEs) return;
   const ok = await confirmDialog({
-    title: '刮削全部影视种子？',
-    desc: '会给列表里每个影视类种子去 TheTVDB 查一次并下载海报，种子多的时候会花点时间，也消耗 API 额度。已经刮过的会跳过，过程中可以随时点「停止」。',
-    okText: '开始刮削',
+    title: tr('刮削全部影视种子？'),
+    desc: tr('会给列表里每个影视类种子去 TheTVDB 查一次并下载海报，种子多的时候会花点时间，也消耗 API 额度。已经刮过的会跳过，过程中可以随时点「停止」。'),
+    okText: tr('开始刮削'),
   });
   if (!ok) return;
   startTvdbScan();
@@ -3569,7 +4291,7 @@ $('#tvdbScanCancel').addEventListener('click', () => {
   if (!tvdbScanEs) return;
   tvdbScanEs.close();
   tvdbScanEs = null;
-  toast('已停止刮削');
+  toast(tr('已停止刮削'));
   refreshAllCovers();
   refreshMediaTitles();
   refreshCacheInfo();
@@ -3621,18 +4343,18 @@ $('#setCacheScan').addEventListener('click', async () => {
       body: JSON.stringify({ scope: 'scan' }),
     });
     const data = await res.json();
-    if (!res.ok) throw new Error(data.message || '清空失败');
+    if (!res.ok) throw new Error(data.message || tr('清空失败'));
     refreshAllCovers();
-    toast('扫描缓存已清空，下次会重新扫描目录', 'ok');
+    toast(tr('扫描缓存已清空，下次会重新扫描目录'), 'ok');
     refreshCacheInfo();
   } catch (err) { toast(err.message, 'err'); } finally { btn.disabled = false; }
 });
 
 $('#setCacheTvdb').addEventListener('click', async () => {
   const ok = await confirmDialog({
-    title: '清空 TheTVDB 缓存？',
-    desc: '会删除已下载的 TVDB 海报和搜索 / 作品图缓存。之后打开封面或重新刮削时会再次联网查询，消耗 API 额度。不影响目录缩略图和你上传的封面。',
-    okText: '清空',
+    title: tr('清空 TheTVDB 缓存？'),
+    desc: tr('会删除已下载的 TVDB 海报和搜索 / 作品图缓存。之后打开封面或重新刮削时会再次联网查询，消耗 API 额度。不影响目录缩略图和你上传的封面。'),
+    okText: tr('清空'),
   });
   if (!ok) return;
   const btn = $('#setCacheTvdb');
@@ -3644,20 +4366,20 @@ $('#setCacheTvdb').addEventListener('click', async () => {
       body: JSON.stringify({ scope: 'tvdb' }),
     });
     const data = await res.json();
-    if (!res.ok) throw new Error(data.message || '清空失败');
+    if (!res.ok) throw new Error(data.message || tr('清空失败'));
     for (const [h, m] of state.coverMode) if (m === 'tvdb') state.coverMode.delete(h);
     state.mediaTitles.clear();
     refreshAllCovers();
-    toast('TheTVDB 缓存已清空，下次会重新联网刮削', 'ok');
+    toast(tr('TheTVDB 缓存已清空，下次会重新联网刮削'), 'ok');
     refreshCacheInfo();
   } catch (err) { toast(err.message, 'err'); } finally { btn.disabled = false; }
 });
 
 $('#setCacheImages').addEventListener('click', async () => {
   const ok = await confirmDialog({
-    title: '清空目录图片缓存？',
-    desc: '会删除自动生成的目录缩略图，之后按目录内容重新生成。不影响 TVDB 海报和你上传 / 挑选过的封面。',
-    okText: '清空',
+    title: tr('清空目录图片缓存？'),
+    desc: tr('会删除自动生成的目录缩略图，之后按目录内容重新生成。不影响 TVDB 海报和你上传 / 挑选过的封面。'),
+    okText: tr('清空'),
   });
   if (!ok) return;
   const btn = $('#setCacheImages');
@@ -3669,28 +4391,11 @@ $('#setCacheImages').addEventListener('click', async () => {
       body: JSON.stringify({ scope: 'images' }),
     });
     const data = await res.json();
-    if (!res.ok) throw new Error(data.message || '清空失败');
+    if (!res.ok) throw new Error(data.message || tr('清空失败'));
     refreshAllCovers();
-    toast('目录图片缓存已清空，之后会按目录内容重新生成', 'ok');
+    toast(tr('目录图片缓存已清空，之后会按目录内容重新生成'), 'ok');
     refreshCacheInfo();
   } catch (err) { toast(err.message, 'err'); } finally { btn.disabled = false; }
-});
-
-$('#setTargetSave').addEventListener('click', async () => {
-  const url = $('#setTarget').value.trim();
-  try {
-    const res = await fetch('/__config', {
-      method: 'POST',
-      headers: { 'content-type': 'application/json' },
-      body: JSON.stringify({ target: url }),
-    });
-    const data = await res.json();
-    if (!res.ok) throw new Error(data.message || '保存失败');
-    toast('已切换，正在重连…', 'ok');
-    state.rid = 0;
-    closeModal('settingsModal');
-    bootAuth();
-  } catch (err) { toast(err.message, 'err'); }
 });
 
 $('#setLimitSave').addEventListener('click', async () => {
@@ -3702,7 +4407,7 @@ $('#setLimitSave').addEventListener('click', async () => {
     const altNow = Boolean(state.server.use_alt_speed_limits);
     if (altNow !== $('#setAltSpeed').checked) await post('/transfer/toggleSpeedLimitsMode');
     state.prefs = null;
-    toast('限速已应用', 'ok');
+    toast(tr('限速已应用'), 'ok');
     refreshNow();
   } catch (err) { toast(err.message, 'err'); }
 });
@@ -3715,18 +4420,22 @@ $('#setInterval').addEventListener('change', (e) => {
   state.pollMs = Number(e.target.value);
   localStorage.setItem(LS.interval, String(state.pollMs));
   schedule();
-  toast(state.pollMs ? `刷新频率 ${state.pollMs / 1000}s` : '已切换为手动刷新');
+  toast(state.pollMs ? tr('刷新频率 {n}s', { n: state.pollMs / 1000 }) : tr('已切换为手动刷新'));
 });
 
 $('#setThumbs').addEventListener('change', (e) => {
   setCoverOn(e.target.checked);
-  toast(e.target.checked ? '列表已显示缩略图' : '列表已隐藏缩略图');
+  toast(e.target.checked ? tr('列表已显示缩略图') : tr('列表已隐藏缩略图'));
+});
+
+$('#setLang').addEventListener('change', (e) => {
+  setLang(e.target.value || null);
 });
 
 $('#setAddMode').addEventListener('change', (e) => {
   applyAddMode(e.target.value);
   localStorage.setItem(LS.addMode, addMode);
-  toast(addMode === 'file' ? '添加种子默认用 .torrent 文件' : '添加种子默认用链接 / Magnet');
+  toast(addMode === 'file' ? tr('添加种子默认用 .torrent 文件') : tr('添加种子默认用链接 / Magnet'));
 });
 
 $('#setListTitle').addEventListener('change', (e) => {
@@ -3740,7 +4449,7 @@ $('#setLogout').addEventListener('click', async () => {
   localStorage.removeItem(LS.creds);
   closeModal('settingsModal');
   $('#loginModal').hidden = false;
-  toast('已退出登录');
+  toast(tr('已退出登录'));
 });
 
 /* ══════════ 概览（移动） ══════════ */
@@ -3755,32 +4464,43 @@ function openStats() {
   });
   $('#statsBody').innerHTML = `
     <div class="mini-stats">
-      <div><small>下载速度</small><b style="color:var(--dl)">${fmtSpeed(s.dl_info_speed || 0)}</b></div>
-      <div><small>上传速度</small><b style="color:var(--up)">${fmtSpeed(s.up_info_speed || 0)}</b></div>
-      <div><small>剩余空间</small><b>${fmtBytes(s.free_space_on_disk || 0)}</b></div>
+      <div><small>${esc(tr('下载速度'))}</small><b style="color:var(--dl)">${fmtSpeed(s.dl_info_speed || 0)}</b></div>
+      <div><small>${esc(tr('上传速度'))}</small><b style="color:var(--up)">${fmtSpeed(s.up_info_speed || 0)}</b></div>
+      <div><small>${esc(tr('剩余空间'))}</small><b>${fmtBytes(s.free_space_on_disk || 0)}</b></div>
     </div>
     <div class="mini-stats">
-      <div><small>下载中</small><b>${counts.dl}</b></div>
-      <div><small>做种中</small><b>${counts.seed}</b></div>
-      <div><small>已暂停</small><b>${counts.pause}</b></div>
+      <div><small>${esc(tr('下载中'))}</small><b>${counts.dl}</b></div>
+      <div><small>${esc(tr('做种中'))}</small><b>${counts.seed}</b></div>
+      <div><small>${esc(tr('已暂停'))}</small><b>${counts.pause}</b></div>
     </div>
     <div class="card-block">
-      <div class="block-title"><svg><use href="#i-activity"/></svg>累计流量</div>
-      <div class="mini-stats">
-        <div><small>下载</small><b>${fmtBytes(s.alltime_dl || 0)}</b></div>
-        <div><small>上传</small><b>${fmtBytes(s.alltime_ul || 0)}</b></div>
-        <div><small>分享率</small><b>${Number(s.global_ratio || 0).toFixed(2)}</b></div>
+      <div class="block-title"><svg><use href="#i-activity"/></svg>${esc(tr('速度趋势'))}<small class="block-sub" id="statsSparkRange">${esc(tr('近 5 分钟'))}</small></div>
+      <div class="spark spark-lg" id="statsSpark"></div>
+      <div class="spark-foot">
+        <span class="lg lg-dl">${esc(tr('下载'))}</span>
+        <span class="lg lg-up">${esc(tr('上传'))}</span>
+        <b id="statsSparkPeak">—</b>
       </div>
     </div>
     <div class="card-block">
-      <div class="block-title"><svg><use href="#i-wifi"/></svg>连接状态</div>
-      <div class="kv" style="border:0"><span>DHT 节点</span><b>${s.dht_nodes ?? 0}</b></div>
-      <div class="kv" style="border:0"><span>已连接 Peers</span><b>${s.total_peer_connections ?? 0}</b></div>
-      <div class="kv" style="border:0"><span>备用速度</span><b>${s.use_alt_speed_limits ? '已开启' : '已关闭'}</b></div>
-      <button class="btn btn-soft" id="statsAltBtn">切换备用速度限制</button>
+      <div class="block-title"><svg><use href="#i-activity"/></svg>${esc(tr('累计流量'))}</div>
+      <div class="mini-stats">
+        <div><small>${esc(tr('下载'))}</small><b>${fmtBytes(s.alltime_dl || 0)}</b></div>
+        <div><small>${esc(tr('上传'))}</small><b>${fmtBytes(s.alltime_ul || 0)}</b></div>
+        <div><small>${esc(tr('分享率'))}</small><b>${Number(s.global_ratio || 0).toFixed(2)}</b></div>
+      </div>
+    </div>
+    <div class="card-block">
+      <div class="block-title"><svg><use href="#i-wifi"/></svg>${esc(tr('连接状态'))}</div>
+      <div class="kv" style="border:0"><span>${esc(tr('DHT 节点'))}</span><b>${s.dht_nodes ?? 0}</b></div>
+      <div class="kv" style="border:0"><span>${esc(tr('已连接 Peers'))}</span><b>${s.total_peer_connections ?? 0}</b></div>
+      <div class="kv" style="border:0"><span>${esc(tr('备用速度'))}</span><b>${s.use_alt_speed_limits ? esc(tr('已开启')) : esc(tr('已关闭'))}</b></div>
+      <button class="btn btn-soft" id="statsAltBtn">${esc(tr('切换备用速度限制'))}</button>
     </div>
   `;
   openModal('statsModal');
+  paintSpark();      // 先用缓存的采样画一版，别让抽屉空着
+  loadSpark(true);   // 再拿最新的
   const altBtn = $('#statsAltBtn');
   if (altBtn) altBtn.addEventListener('click', toggleAltSpeed);
 }
@@ -3788,7 +4508,7 @@ function openStats() {
 async function toggleAltSpeed() {
   try {
     await post('/transfer/toggleSpeedLimitsMode');
-    toast('已切换限速模式', 'ok');
+    toast(tr('已切换限速模式'), 'ok');
     refreshNow();
   } catch (err) { toast(err.message, 'err'); }
 }
@@ -3832,7 +4552,7 @@ function setSideCollapsed(collapsed, { save = true } = {}) {
   else delete document.documentElement.dataset.side;
   const btn = $('#sideToggle');
   if (btn) {
-    const label = collapsed ? '展开侧边栏' : '收起侧边栏';
+    const label = collapsed ? tr('展开侧边栏') : tr('收起侧边栏');
     btn.title = label;
     btn.setAttribute('aria-label', label);
     btn.setAttribute('aria-expanded', String(!collapsed));
@@ -3866,12 +4586,63 @@ $('#themeBtn').addEventListener('click', () => {
   applyTheme(next);
 });
 
+/* ══════════ 语言 ══════════ */
+/* 静态文案由 i18n.js 的 applyDom 负责，这里只管那些由 JS 拼出来的文字：
+   行内容、侧边栏、详情、概览。凡是带缓存的渲染都先把缓存键清掉，
+   否则中文的「已完成」会一直留在 pill 里。 */
+function relang() {
+  for (const el of rowCache.values()) {
+    el._v = {};
+    applyDom(el);
+  }
+  const catList = $('#catList');
+  if (catList) catList._sig = null;
+  const tagList = $('#tagList');
+  if (tagList) tagList._sig = null;
+  const chips = $('#chips');
+  if (chips) chips._sig = null;
+  renderRows();
+  renderServer();
+  paintSpark();
+  setSideCollapsed(sideCollapsed(), { save: false });
+  if (state.detailHash) renderDetail();
+  if (!$('#statsModal').hidden) openStats();
+  const langBtn = $('#langBtn');
+  if (langBtn) {
+    const label = getLang() === 'zh' ? 'English' : '中文';
+    langBtn.title = label;
+    langBtn.setAttribute('aria-label', label);
+  }
+  // 设置面板里的语言下拉要跟着回来（auto 由 localStorage 是否为空决定）
+  const sel = $('#setLang');
+  if (sel && !$('#settingsModal').hidden) {
+    let savedLang = '';
+    try { savedLang = localStorage.getItem('qb.lang') || ''; } catch { /* 忽略 */ }
+    sel.value = savedLang === 'zh' || savedLang === 'en' ? savedLang : '';
+  }
+}
+
+onLangChange(relang);
+
+$('#langBtn')?.addEventListener('click', () => {
+  setLang(getLang() === 'zh' ? 'en' : 'zh');
+});
+
+// 首屏按目标语言刷一次按钮提示（静态文案已由 bootI18n 铺好）
+(() => {
+  const langBtn = $('#langBtn');
+  if (!langBtn) return;
+  const label = getLang() === 'zh' ? 'English' : '中文';
+  langBtn.title = label;
+  langBtn.setAttribute('aria-label', label);
+})();
+
 $('#altSpeedBtn').addEventListener('click', toggleAltSpeed);
 
 $('#thumbBtn').addEventListener('click', () => {
   const next = !state.coverOn;
   setCoverOn(next);
-  toast(next ? '已显示缩略图' : '已隐藏缩略图');
+  toast(next ? tr('已显示缩略图') : tr('已隐藏缩略图'));
 });
 
 /* ══════════ 登录 ══════════ */
@@ -3931,15 +4702,15 @@ async function doLogin(username, password, silent) {
           body: JSON.stringify({ clear: true }),
         }).catch(() => {});
       }
-      if (!silent) toast('登录成功', 'ok');
+      if (!silent) toast(tr('登录成功'), 'ok');
       state.rid = 0;
       refreshNow();
       return true;
     }
-    throw new Error('用户名或密码错误');
+    throw new Error(tr('用户名或密码错误'));
   } catch (err) {
     if (!silent) {
-      $('#loginErr').textContent = err.message || '登录失败';
+      $('#loginErr').textContent = err.message || tr('登录失败');
       $('#loginErr').hidden = false;
     }
     $('#loginModal').hidden = false;
@@ -3951,10 +4722,10 @@ $('#loginForm').addEventListener('submit', (e) => {
   e.preventDefault();
   const btn = $('#loginSubmit');
   btn.disabled = true;
-  btn.textContent = '登录中…';
+  btn.textContent = tr('登录中…');
   doLogin($('#loginUser').value, $('#loginPass').value, false).finally(() => {
     btn.disabled = false;
-    btn.textContent = '登录';
+    btn.textContent = tr('登录');
   });
 });
 
@@ -3971,7 +4742,7 @@ async function bootAuth() {
     tick();
   } catch (err) {
     if (!err.unauthorized) {
-      toast(err.message || '无法连接 qBittorrent', 'err');
+      toast(err.message || tr('无法连接 qBittorrent'), 'err');
     }
   }
 }
@@ -4036,6 +4807,10 @@ async function boot() {
   window.addEventListener('resize', () => {
     if (!isMobile()) closeSidebar();
   });
+
+  // 速度折线：服务端一直在采样，这边只要在前台就每 5 秒取一次（约 1KB，独立于列表轮询）
+  loadSpark(true);
+  setInterval(() => { if (!document.hidden) loadSpark(); }, 5000);
 }
 
 document.addEventListener('visibilitychange', () => {
@@ -4058,14 +4833,14 @@ $('#setCheckUpdate')?.addEventListener('click', async () => {
     const next = await reg?.update();
     const waiting = next?.waiting || next?.installing;
     if (waiting) {
-      toast('新版本已就绪，即将刷新', 'ok');
+      toast(tr('新版本已就绪，即将刷新'), 'ok');
       waiting.postMessage('SKIP_WAITING');
       setTimeout(() => location.reload(), 1200);
     } else {
-      toast('已是最新版本', 'ok');
+      toast(tr('已是最新版本'), 'ok');
     }
   } catch (err) {
-    toast(`检查失败：${err.message}`, 'err');
+    toast(tr('检查失败：{msg}', { msg: err.message }), 'err');
   } finally {
     btn.disabled = false;
   }

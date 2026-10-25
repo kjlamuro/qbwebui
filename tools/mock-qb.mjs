@@ -171,6 +171,11 @@ torrents.forEach(normalize);
 
 const sum = (fn) => torrents.reduce((a, t) => a + fn(t), 0);
 
+/** 速度随时间轻微起伏：否则侧边栏的速度折线是一条直线，演示和截图都看不出效果 */
+const wobble = (seed) => 1
+  + 0.18 * Math.sin(Date.now() / 11000 + seed)
+  + 0.06 * Math.sin(Date.now() / 3700 + seed * 2);
+
 const serverState = () => ({
   alltime_dl: 3.42e12,
   alltime_ul: 12.1e12,
@@ -178,7 +183,7 @@ const serverState = () => ({
   connection_status: 'connected',
   dht_nodes: 412,
   dl_info_data: 184.2e9,
-  dl_info_speed: sum((t) => t.dlspeed),
+  dl_info_speed: sum((t) => t.dlspeed) * wobble(0),
   dl_rate_limit: 0,
   free_space_on_disk: 2.01e12,
   global_ratio: '3.56',
@@ -192,7 +197,7 @@ const serverState = () => ({
   total_queued_size: 0,
   total_wasted_session: 12.4e6,
   up_info_data: 402.7e9,
-  up_info_speed: sum((t) => t.upspeed),
+  up_info_speed: sum((t) => t.upspeed) * wobble(1.7),
   up_rate_limit: 0,
   use_alt_speed_limits: false,
   write_cache_overload: '0',

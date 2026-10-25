@@ -1,7 +1,7 @@
 {
   "name": "qbwebui",
   "version": "1.0.0",
-  "description": "轻量 qBittorrent WebUI：桌面 / 移动端自适应，零依赖",
+  "description": "轻量 qBittorrent WebUI：桌面 / 移动端自适应，零依赖，中英双语 | Lightweight, self-hosted qBittorrent web UI: responsive, zero-dependency, bilingual (zh/en)",
   "type": "module",
   "license": "MIT",
   "author": "kjlamuro",
@@ -19,7 +19,9 @@
     "torrent",
     "self-hosted",
     "pwa",
-    "zero-dependency"
+    "zero-dependency",
+    "i18n",
+    "bilingual"
   ],
   "private": true,
   "scripts": {
@@ -27,7 +29,9 @@
     "dev": "node server.mjs",
     "demo": "node tools/demo.mjs",
     "shots": "node tools/shots.mjs",
-    "check": "node --check server.mjs && node --check lib/covers.mjs && node --check lib/tvdb.mjs && node --check public/app.js && node --check tools/mock-qb.mjs && node --check tools/demo.mjs && node --check tools/shots.mjs"
+    "shots:en": "node tools/shots.mjs --lang en",
+    "i18n": "node tools/i18n-check.mjs",
+    "check": "node --check server.mjs && node --check lib/covers.mjs && node --check lib/tvdb.mjs && node --check lib/speedlog.mjs && node --check public/i18n.js && node --check public/app.js && node --check public/sw.js && node --check tools/mock-qb.mjs && node --check tools/demo.mjs && node --check tools/shots.mjs && node tools/i18n-check.mjs"
   },
   "engines": {
     "node": ">=18"

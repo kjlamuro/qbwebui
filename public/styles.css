@@ -27,6 +27,21 @@
     "Hiragino Sans GB", "Microsoft YaHei", "Helvetica Neue", Arial, sans-serif;
 }
 
+/* ── 多语言 ──────────────────────────────────────────────
+   英文界面在首帧之前先把 body 藏住（index.html 的内联脚本加这个 class，
+   app.js 铺完文案再摘掉），否则非中文用户会先看到一帧中文再跳变。
+   2 秒兜底在 index.html 里，脚本万一挂了也不会白屏。 */
+html.i18n-pending body {
+  visibility: hidden;
+}
+
+/* 英文行高比中文略高：按钮、标签这种单行元素用不到额外空间，正文才需要 */
+html[data-lang="en"] .hint,
+html[data-lang="en"] .modal-sub,
+html[data-lang="en"] .tvdb-side-desc {
+  line-height: 1.55;
+}
+
 /* ── 深色 ────────────────────────────────────────────── */
 html[data-theme="dark"] {
   --bg: #0a0c11;
@@ -182,7 +197,13 @@ small { font-size: 11px; }
   border-right: 1px solid var(--line);
   backdrop-filter: blur(20px);
   z-index: 30;
+  /* 矮屏（SE 这种 667px）放不下全部内容时整体可滚，
+     否则分类 / 标签会被 flex 压扁、内容直接被裁掉 */
+  overflow-y: auto;
+  overscroll-behavior: contain;
+  scrollbar-width: none;
 }
+.sidebar::-webkit-scrollbar { display: none; }
 
 .side-head { display: flex; align-items: center; justify-content: space-between; padding: 2px 6px 0; }
 
@@ -243,7 +264,7 @@ small { font-size: 11px; }
 .dot-pause { background: var(--text-mute); }
 .dot-err { background: var(--danger); box-shadow: 0 0 0 3px color-mix(in srgb, var(--danger) 18%, transparent); }
 
-.side-section { display: flex; flex-direction: column; gap: 8px; min-height: 0; }
+.side-section { display: flex; flex-direction: column; gap: 8px; min-height: 0; flex: 0 0 auto; }
 .side-title {
   display: flex; align-items: center; justify-content: space-between;
   font-size: 11px; font-weight: 600; letter-spacing: 0.8px;
@@ -334,6 +355,63 @@ small { font-size: 11px; }
   border-radius: 99px;
   background: linear-gradient(90deg, var(--accent), var(--accent-2));
   transition: width 600ms var(--ease);
+}
+
+/* 速度折线：侧边栏和移动端概览共用同一段 svg，只有容器高度不同 */
+.side-spark {
+  padding: 10px 11px 6px;
+  border-radius: var(--radius);
+  background: var(--surface-2);
+  border: 1px solid var(--line);
+}
+.spark-head {
+  display: flex; align-items: baseline; justify-content: space-between;
+  font-size: 11px; color: var(--text-mute); margin-bottom: 4px;
+}
+.spark-head b { font-weight: 600; color: var(--text-dim); font-variant-numeric: tabular-nums; }
+.spark { height: 40px; position: relative; }
+.spark .spark-svg { display: block; width: 100%; height: 100%; }
+/* 曲线右端的实时点：跟着当前下载速度上下走，带一圈呼吸光晕 */
+.spark-dot {
+  position: absolute; right: -1px; width: 6px; height: 6px; margin-top: -3px;
+  border-radius: 50%; background: var(--dl);
+  box-shadow: 0 0 0 0 color-mix(in srgb, var(--dl) 60%, transparent);
+  animation: sparkPing 2s var(--ease) infinite;
+  pointer-events: none;
+}
+@keyframes sparkPing {
+  0% { box-shadow: 0 0 0 0 color-mix(in srgb, var(--dl) 60%, transparent); }
+  70% { box-shadow: 0 0 0 7px color-mix(in srgb, var(--dl) 0%, transparent); }
+  100% { box-shadow: 0 0 0 0 color-mix(in srgb, var(--dl) 0%, transparent); }
+}
+@media (prefers-reduced-motion: reduce) {
+  .spark-dot { animation: none; }
+}
+.spark-empty {
+  height: 100%;
+  display: grid; place-items: center;
+  font-size: 11px; color: var(--text-mute);
+}
+/* 上游连不上：数据停在过去某一刻，调暗 + 换色，提示它不是实时的 */
+.spark-head b.is-stale { color: #f0a020; }
+.spark.is-stale { opacity: 0.45; }
+.block-sub { margin-left: auto; font-size: 10.5px; font-weight: 500; color: var(--text-mute); }
+.spark-lg { height: 64px; }
+.spark-foot {
+  display: flex; align-items: center; gap: 12px;
+  font-size: 11px; color: var(--text-mute);
+}
+.spark-foot .lg { display: inline-flex; align-items: center; gap: 5px; }
+.spark-foot .lg::before {
+  content: ""; width: 10px; height: 2.5px; border-radius: 2px; background: var(--dl);
+}
+.spark-foot .lg-up::before { background: var(--up); opacity: 0.7; }
+.spark-foot b { margin-left: auto; color: var(--text-dim); font-variant-numeric: tabular-nums; font-weight: 600; }
+
+/* 矮屏上给侧边栏省点高度，剩下的交给 .sidebar 自己滚 */
+@media (max-height: 760px) {
+  .side-spark { padding: 8px 10px 4px; }
+  .spark { height: 32px; }
 }
 
 /* ══════════ 主区域 ══════════ */
@@ -539,6 +617,26 @@ small { font-size: 11px; }
 }
 .list-head .col.active .arrow { opacity: 1; }
 .list-head .col.active.desc .arrow { transform: rotate(0deg); }
+/* 右对齐的那几列（下载/上传/分享率/剩余）里，箭头虽然 opacity:0 却仍占 7px 宽，
+   加上 flex gap 一共 11px，会把表头文字往左挤——而单元格里的数值没有这个偏移，
+   于是「剩余」和下面的「26分」差了整整一段。这里让箭头脱离布局，只用它那 7px 的
+   三角形自己定位，文字就真正贴到列边、跟数值对齐了。 */
+.list-head .col:nth-child(n + 5):nth-child(-n + 8) {
+  position: relative;
+}
+.list-head .col:nth-child(n + 5):nth-child(-n + 8) .arrow {
+  position: absolute;
+  top: 50%;
+  right: -7px;
+  margin-top: -2.5px;
+}
+/* 「剩余」右边紧挨着「状态」徽标：一个右对齐、一个左对齐，只靠 10px 网格间隙
+   会粘成一片。两边各让出 12px，中间就有 22px 的呼吸；排序三角也收进来，
+   免得它一出现又把「状态」顶住。 */
+.list-head .col[data-sort="eta"],
+.cell.eta { padding-right: 12px; }
+/* 选择器要带上 nth-child，否则特异性低于上面那条 -7px 的规则，right 会被盖掉 */
+.list-head .col:nth-child(n + 5):nth-child(-n + 8)[data-sort="eta"] .arrow { right: 3px; }
 .list-head .col-name { justify-content: flex-start; }
 .list-head .col:nth-child(n + 5):nth-child(-n + 8) { justify-content: flex-end; }
 /* 操作列只有图标按钮，表头文字居中并弱化，避免抢视觉 */
@@ -1354,40 +1452,26 @@ input:checked + .checkbox::after { opacity: 1; transform: rotate(-45deg) scale(1
 .cover-pick-main b { font-size: 12.5px; font-weight: 600; }
 .cover-pick-main small { font-size: 11px; color: var(--text-mute); line-height: 1.5; }
 .cover-pick-actions { display: flex; gap: 8px; margin-top: 6px; flex-wrap: wrap; }
-/* 关键词：默认填种子名，用户随时能改，改完回车就按新词重搜。
-   输入框沿用 .field input 的样式（它在 .field 里），这里只管排版 */
-.add-kw-row { display: flex; align-items: center; gap: 7px; margin-top: 8px; }
-.add-kw-row input { flex: 1; min-width: 0; width: auto; }
-.add-kw-row .btn { white-space: nowrap; flex: none; }
+/* 关键词那一行的排布：输入框模样交给详情页同款的 .tvdb-bar（之前自己捏过一套，
+   输入框 38px 高、按钮 30px，肩并肩看着就是没对齐），这里只补个上边距。 */
+.add-kw-row { margin-top: 9px; }
 .add-kw-row .btn.is-busy { opacity: 0.7; }
-/* 关键词下面那行小字：说明关键词是从文件名里剥出来的，嫌不对可以直接改 */
+/* 关键词下面那行小字：说明关键词是从文件名里剥出来的，嫌不对可以直接改；
+   候选列表的提示也复用了这一条样式 */
 .add-kw-hint { margin: 6px 0 0; font-size: 11px; line-height: 1.45; color: var(--text-mute); }
 .add-kw-hint b { color: var(--text-dim); font-weight: 600; }
-/* 刮削出来的候选海报：横向一排，点一张就换成它 */
-.add-arts {
-  display: flex;
-  gap: 6px;
-  margin-top: 8px;
-  padding-bottom: 2px;
-  overflow-x: auto;
-  scrollbar-width: none;
-}
-.add-arts::-webkit-scrollbar { display: none; }
-.add-art {
-  flex: 0 0 auto;
-  width: 42px;
-  aspect-ratio: 2 / 3;
-  padding: 0;
-  border: 2px solid transparent;
-  border-radius: 7px;
-  overflow: hidden;
-  background: var(--surface-2);
-  cursor: pointer;
-  transition: border-color var(--fast), transform var(--fast);
-}
-.add-art img { width: 100%; height: 100%; object-fit: cover; display: block; }
-.add-art:hover { transform: translateY(-1px); }
-.add-art.is-on { border-color: var(--accent); }
+/* 候选出来时把弹窗加宽到 720px 给双栏腾地方（详情页那个封面弹窗同理加宽到 780px）；
+   窄屏下 .add-card 本身就是 100%，加不加宽没区别。 */
+.add-card.is-wide { width: min(720px, 100%); }
+/* 刮削结果：详情页是「左列表 + 右简介」双栏，添加弹窗照搬同一套 .tvdb-split / .tvdb-row /
+   .tvdb-side，只是把它压矮——同一个弹窗里还有种子 / 路径好几段要挤，高了就够不着「开始下载」。
+   用 .tvdb-split-add 做前缀是为了压过后面的窄屏 .tvdb-list / .tvdb-side 高度。 */
+.tvdb-split-add .tvdb-list,
+.tvdb-split-add .tvdb-side { max-height: 30vh; }
+.tvdb-split-add { margin-top: 8px; }
+.cover-grid-add { max-height: 26vh; margin-top: 9px; }
+/* 详情页的海报格是点一下就套用、不需要选中态；添加时要记住选了哪张，故补一圈描边 */
+.cover-add-item.is-on { border-color: var(--accent); box-shadow: 0 0 0 2px color-mix(in srgb, var(--accent) 30%, transparent); }
 
 /* ══════════ 遮罩 ══════════ */
 .scrim {
@@ -1414,14 +1498,26 @@ input:checked + .checkbox::after { opacity: 1; transform: rotate(-45deg) scale(1
   position: fixed; inset: 0;
   display: grid; place-items: center;
   padding: 20px;
-  background: var(--scrim);
+  /* 底色交给 .modal-scrim 那一层：下拉关闭时只改它的 opacity，
+     全程走合成，不用每帧重绘整屏背景 */
+  background: transparent;
   backdrop-filter: blur(6px);
   z-index: 100;
   animation: fade 180ms var(--ease);
 }
 @keyframes fade { from { opacity: 0; } to { opacity: 1; } }
 
+/* 遮罩层：垫在卡片下面（卡片 position:relative 抬一层）。
+   pointer-events:none 让点空白仍然命中 .modal 本体，关闭逻辑照旧 */
+.modal-scrim {
+  position: absolute; inset: 0; z-index: 0;
+  background: var(--scrim);
+  transition: opacity var(--normal);
+  pointer-events: none;
+}
+
 .modal-card {
+  position: relative; z-index: 1;
   width: min(560px, 100%);
   max-height: 90dvh;
   display: flex; flex-direction: column;
@@ -1435,6 +1531,29 @@ input:checked + .checkbox::after { opacity: 1; transform: rotate(-45deg) scale(1
 @keyframes pop {
   from { opacity: 0; transform: translateY(14px) scale(0.97); }
   to { opacity: 1; transform: none; }
+}
+
+/* 下拉关闭手势（窄屏）：拖拽期间 transform 必须跟手，别被过渡和选中态拖住 */
+.modal-card.is-dragging,
+.sheet-card.is-dragging,
+.detail.is-dragging {
+  transition: none !important;
+  will-change: transform;
+  user-select: none;
+  -webkit-user-select: none;
+}
+/* 遮罩同理：带着 transition 的话，每写一次 opacity 都会重启过渡，遮罩永远慢半拍 */
+.modal-scrim.is-dragging,
+.scrim.is-dragging {
+  transition: none !important;
+  will-change: opacity;
+}
+/* 拖拽期间摘掉全屏模糊：每帧重算一遍高斯是掉帧大头，
+   隔着 65% 的黑幕其实也看不出那点模糊 */
+.modal.is-dragging,
+.scrim.is-dragging {
+  backdrop-filter: none !important;
+  -webkit-backdrop-filter: none !important;
 }
 
 .modal-head {
@@ -1746,7 +1865,14 @@ input:checked + .checkbox::after { opacity: 1; transform: rotate(-45deg) scale(1
 }
 .mini-stats small { color: var(--text-mute); font-size: 10.5px; }
 .mini-stats b { font-size: 14px; }
-.row-actions { display: flex; align-items: center; justify-content: space-between; gap: 10px; }
+/* 一行放不下就换行：英文文案比中文长一截，三个按钮会挤破卡片右边界 */
+.row-actions {
+  display: flex; align-items: center; justify-content: space-between;
+  gap: 8px 10px; flex-wrap: wrap;
+}
+.row-actions > .btn { flex: 0 1 auto; max-width: 100%; }
+/* 换行后上下两行各自撑满，看着是刻意排的两行，不是一个按钮被挤下来 */
+.row-actions--fill > .btn { flex: 1 1 auto; }
 
 /* 登录 */
 .login-card { width: min(400px, 100%); padding: 30px 28px 26px; align-items: stretch; }
@@ -2190,11 +2316,18 @@ input:checked + .checkbox::after { opacity: 1; transform: rotate(-45deg) scale(1
   .cover-acts .paste-input { width: auto; }
   .tvdb-bar { flex-wrap: wrap; }
   .tvdb-bar input[type='text'] { flex: 1 1 100%; }
+  /* 添加框里只有「关键词 + 刮削封面」两个控件，窄屏也不用换行，比详情页那排紧凑 */
+  .add-kw-row { flex-wrap: nowrap; }
+  .add-kw-row input[type='text'] { flex: 1 1 auto; }
   /* 窄屏双栏撑不开，改成上下：列表限高自己滚，简介跟在下面 */
   .tvdb-split { grid-template-columns: 1fr; }
   .tvdb-list { max-height: 32vh; }
   .tvdb-side { max-height: none; }
   .tvdb-side-pic { width: 74px; }
+  /* 添加弹窗里刮削结果只是表单的一小段，窄屏别把它撑得太高，否则要点到「开始下载」很难够 */
+  .tvdb-split-add .tvdb-list,
+  .tvdb-split-add .tvdb-side,
+  .cover-grid-add { max-height: 26vh; }
 
   .state-view { padding: 54px 20px; }
 }
