@@ -46,6 +46,13 @@ cat > "$PLIST" <<PLIST_EOF
   </array>
   <key>WorkingDirectory</key>
   <string>$DIR</string>
+  <key>EnvironmentVariables</key>
+  <dict>
+    <!-- fs 与 DNS 共用这个线程池，默认只有 4 个。外置盘掉速时单个卡住的
+         open() 就能把 4 个全拖住，连静态文件都发不出去。 -->
+    <key>UV_THREADPOOL_SIZE</key>
+    <string>8</string>
+  </dict>
   <key>RunAtLoad</key>
   <true/>
   <key>KeepAlive</key>

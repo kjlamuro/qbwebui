@@ -103,6 +103,7 @@ async function ensureSid() {
         method: 'POST',
         headers: { 'content-type': 'application/x-www-form-urlencoded', referer: config.target + '/', origin: config.target },
         body: body.toString(),
+        signal: AbortSignal.timeout(UPSTREAM_TIMEOUT.api),
       });
       const cookies = typeof up.headers.getSetCookie === 'function' ? up.headers.getSetCookie() : [];
       for (const c of cookies) {
@@ -148,6 +149,7 @@ async function proxy(req, res, rawBody) {
       headers,
       body: rawBody && rawBody.length ? rawBody : undefined,
       redirect: 'manual',
+      signal: AbortSignal.timeout(UPSTREAM_TIMEOUT.proxy),
     });
   } catch (err) {
     res.writeHead(502, { 'content-type': 'application/json; charset=utf-8' });
@@ -220,11 +222,28 @@ function json(res, status, data) {
   res.end(JSON.stringify(data));
 }
 
+/**
+ * 上游请求一律带超时。
+ *
+ * 之前一处都没设：qBittorrent 只要不响应（进程卡住、端口有人 listen 却没人
+ * accept），fetch 就会一直挂着，代理请求和后台采样全都永远不返回。采样用的
+ * 超时必须小于采样间隔，否则每轮都会叠上一个新的挂起请求。
+ */
+const UPSTREAM_TIMEOUT = {
+  sample: 4000, // < 采样间隔（默认 5000）
+  api: 8000, // 服务端自己的接口调用
+  proxy: 15000, // 转发浏览器的请求，大 payload 留余量
+  short: 5000, // 注销、自检这类
+};
+
 /** 服务端自己访问 qBittorrent（本地回环通常免登录，仍带上 SID 以防万一） */
 async function qbFetch(pathname) {
   const headers = { referer: config.target + '/', origin: config.target };
   if (sid) headers.cookie = `SID=${sid}`;
-  const r = await fetch(config.target + pathname, { headers });
+  const r = await fetch(config.target + pathname, {
+    headers,
+    signal: AbortSignal.timeout(UPSTREAM_TIMEOUT.api),
+  });
   if (!r.ok) throw new Error(`upstream ${r.status}`);
   return r.json();
 }
@@ -279,6 +298,7 @@ const server = http.createServer(async (req, res) => {
         await fetch(targetUrl('/api/v2/auth/logout'), {
           method: 'POST',
           headers: sid ? { cookie: `SID=${sid}` } : {},
+          signal: AbortSignal.timeout(UPSTREAM_TIMEOUT.short),
         });
       } catch { /* 忽略 */ }
       sid = null;
@@ -352,7 +372,9 @@ await speedlog.ready();
 if (process.argv.includes('--check')) {
   // 自检：确认上游可用后退出，供脚本使用
   try {
-    const r = await fetch(config.target + '/api/v2/app/version');
+    const r = await fetch(config.target + '/api/v2/app/version', {
+      signal: AbortSignal.timeout(UPSTREAM_TIMEOUT.short),
+    });
     console.log(`[qBWebUI] upstream ${config.target} -> ${r.status}`);
     process.exit(r.ok ? 0 : 1);
   } catch (err) {
@@ -433,3 +455,56 @@ server.listen(config.port, '0.0.0.0', () => {
   console.log(`  上游   ${config.target}`);
   console.log('');
 });
+
+/* ── 线程池看门狗 ──────────────────────────────────────────────
+ * libuv 的线程池只有 4 个线程，所有 fs 操作共用它。外置硬盘掉速、休眠唤醒、
+ * 盘符短暂失联时，一次 readdir / stat 的 open() 可能永久阻塞在内核里——这种
+ * 阻塞没有超时，JS 层完全无从中断。4 个线程被占满之后，静态文件、上游代理、
+ * 采样请求全部无限排队：进程还在、端口还在监听，但一个响应都发不出来。
+ * （2026-10-26 06:32 那次就是这样挂的，日志里一个字都没有，最后只能 SIGKILL。）
+ *
+ * 这种事在应用层救不回来，能做的只有「尽快发现 → 果断退出 → 交给 launchd
+ * 重启」。探针用的就是走线程池的 fs.stat，最能直接反映线程池死活。
+ */
+const startedAt = Date.now();
+const WATCHDOG = {
+  intervalMs: Number(process.env.QBWEBUI_WATCHDOG_MS ?? 5000),
+  probeTimeoutMs: 3000,
+  strikes: 3, // 连续 3 次（约 9 秒）都不响应才动手，避免偶发慢 IO 被误杀
+  // 启动 2 分钟内不查：缓存冷的时候外置盘本来就慢
+  warmupMs: Number(process.env.QBWEBUI_WATCHDOG_WARMUP_MS ?? 120000),
+};
+
+let fsStrikes = 0;
+
+function probeThreadpool() {
+  return new Promise((resolve) => {
+    const timer = setTimeout(() => resolve(false), WATCHDOG.probeTimeoutMs);
+    // 成功也好、ENOENT 也好，都说明线程池能干活；只有「一直不回来」才算卡死
+    stat(path.join(ROOT, 'package.json')).then(
+      () => { clearTimeout(timer); resolve(true); },
+      () => { clearTimeout(timer); resolve(true); }
+    );
+  });
+}
+
+if (WATCHDOG.intervalMs > 0) {
+  setInterval(async () => {
+    if (Date.now() - startedAt < WATCHDOG.warmupMs) return;
+    if (await probeThreadpool()) {
+      fsStrikes = 0;
+      return;
+    }
+    fsStrikes += 1;
+    if (fsStrikes < WATCHDOG.strikes) {
+      console.error(`[qBWebUI] 文件系统无响应（第 ${fsStrikes}/${WATCHDOG.strikes} 次），继续观察`);
+      return;
+    }
+    console.error('');
+    console.error('[qBWebUI] 线程池已被卡死：文件系统连续多次无响应，服务实际已不可用。');
+    console.error('[qBWebUI] 主动退出，交给 launchd 重启（外置硬盘掉速 / 休眠唤醒常见原因）。');
+    console.error('');
+    // 不能用 process.exit：退出钩子里的写盘同样会卡死。SIGKILL 才能保证真的退出去。
+    process.kill(process.pid, 'SIGKILL');
+  }, WATCHDOG.intervalMs).unref();
+}

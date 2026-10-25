@@ -38,6 +38,11 @@ LOG="$LOGDIR/qbwebui.log"
 PIDFILE="$LOGDIR/qbwebui-${PORT}.pid"
 LOCKFILE="$LOGDIR/qbwebui-${PORT}.lock"
 
+# 线程池从默认的 4 调到 8：fs 和 DNS 共用它，外置盘掉速时单个卡住的 open()
+# 会把 4 个线程全拖住，连静态文件都发不出去。调大只是降低被整锅端掉的概率，
+# 真正的兜底是 server.mjs 里的看门狗。
+export UV_THREADPOOL_SIZE="${UV_THREADPOOL_SIZE:-8}"
+
 port_busy() { lsof -nP -iTCP:"$PORT" -sTCP:LISTEN >/dev/null 2>&1; }
 open_ui() { [ "${QBWEBUI_NO_OPEN:-}" = "1" ] || open "$URL" 2>/dev/null; }
 
