@@ -1421,6 +1421,25 @@ input:checked + .checkbox::after { opacity: 1; transform: rotate(-45deg) scale(1
   animation: cover-shine 1.2s linear infinite;
 }
 .cover-sec small.is-busy { color: var(--accent); }
+/* 刮削元信息 → 媒体目录（手动） */
+.meta-bar {
+  display: flex; align-items: center; gap: 8px; flex-wrap: wrap;
+  margin: 10px 0 0;
+  padding: 9px 11px;
+  background: var(--surface-2);
+  border: 1px solid var(--line);
+  border-radius: 10px;
+}
+.meta-bar .meta-text {
+  flex: 1; min-width: 0;
+  font-size: 11.5px; font-weight: 500;
+  color: var(--text-mute);
+  overflow: hidden; text-overflow: ellipsis;
+}
+.meta-bar .meta-text.is-ok { color: var(--up); }
+.meta-bar .meta-text.is-warn { color: var(--warn); }
+.meta-bar .meta-text.is-err { color: var(--danger); }
+.meta-bar .btn { white-space: nowrap; }
 .tvdb-attr { margin: 9px 0 0; text-align: center; }
 .tvdb-attr a { color: var(--accent); text-decoration: none; }
 .tvdb-attr a:hover { text-decoration: underline; }

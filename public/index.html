@@ -15,7 +15,7 @@
 <link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'><defs><linearGradient id='g' x1='0' y1='0' x2='1' y2='1'><stop offset='0' stop-color='%232F67BA'/><stop offset='1' stop-color='%234E8FE0'/></linearGradient></defs><rect width='32' height='32' rx='7.25' fill='url(%23g)'/><g stroke='%23fff' stroke-linecap='round' stroke-linejoin='round' fill='none'><path d='M16 4.75v7.75M12 9.5l4 3.375 4-3.375' stroke-width='2.13'/><circle cx='12' cy='22.75' r='2.13' stroke-width='1.5'/><path d='M14.13 22.75v4.25' stroke-width='1.5'/><path d='M17.63 17.13v5.62' stroke-width='1.5'/><circle cx='19.75' cy='22.75' r='2.13' stroke-width='1.5'/></g></svg>" />
 <!-- ?v= 是资源版本号：改 styles.css / app.js 必须同步改这里，iOS PWA 的 Service Worker
      更新不可靠，靠 URL 变化强制绕过旧缓存。sw.js 的 SHELL 列表也要同步。 -->
-<link rel="stylesheet" href="styles.css?v=20261025col" />
+<link rel="stylesheet" href="styles.css?v=20261026meta" />
 <link rel="manifest" href="manifest.webmanifest" />
 <!-- ?v= 同样用于破缓存：Safari 按 URL 缓存 apple-touch-icon，改图标不换 URL 会一直读到旧图 -->
 <link rel="apple-touch-icon" href="icon-180.png?v=20261025ico" />
@@ -460,6 +460,7 @@
             <button class="btn btn-soft btn-sm" id="coverUpload" title="选择图片，或直接 ⌘/Ctrl+V 粘贴" data-i18n-text="html.cover.upload" data-i18n-title="html.cover.uploadTitle"><svg><use href="#i-upload"/></svg>上传</button>
             <button class="btn btn-soft btn-sm" id="coverIcon" data-i18n-text="html.cover.icon"><svg><use href="#i-image"/></svg>用图标</button>
             <button class="btn btn-ghost btn-sm" id="coverAuto" data-i18n-text="html.cover.auto"><svg><use href="#i-refresh"/></svg>自动</button>
+            <button class="btn btn-ghost btn-sm" id="coverRescan" data-i18n-text="html.cover.rescan" data-i18n-title="html.cover.rescanTitle" title="重新读一遍这个种子的目录（平时走缓存，不会去打扰磁盘）"><svg><use href="#i-search"/></svg>重新扫描</button>
             <div class="paste-input paste-input--inline" id="coverPasteInput" contenteditable="true" role="textbox" inputmode="none"
               aria-label="粘贴封面图片" data-i18n-aria="html.add.pasteAria" title="长按这里粘贴，桌面也可以直接 ⌘/Ctrl+V" data-i18n-title="html.add.pasteTitle"
               data-placeholder="长按粘贴图片" data-i18n-data-placeholder="html.add.pastePlaceholderAlt"></div>
@@ -494,6 +495,11 @@
         <div class="tvdb-side" id="tvdbSide" hidden></div>
       </div>
       <div class="cover-grid" id="tvdbGrid" hidden></div>
+      <div class="meta-bar" id="metaBar" hidden>
+        <span class="meta-text" id="metaText">—</span>
+        <button class="btn btn-soft btn-sm" id="coverApply" data-i18n-text="html.cover.apply" data-i18n-title="html.cover.applyTitle" title="把刮削到的海报和 NFO 写进种子所在目录，供 Plex / Jellyfin / Kodi 识别"><svg><use href="#i-download"/></svg>应用到媒体目录</button>
+        <button class="btn btn-ghost btn-sm" id="coverMetaRemove" hidden data-i18n-text="html.cover.applyRemove"><svg><use href="#i-trash"/></svg>移除</button>
+      </div>
       <p class="hint tvdb-attr" data-i18n-html="html.cover.attr">Metadata provided by <a href="https://www.thetvdb.com" target="_blank" rel="noreferrer">TheTVDB</a> · 海报版权归各自权利人，仅限个人本地使用</p>
     </div>
   </div>
@@ -681,6 +687,6 @@
 
 <div class="toasts" id="toasts"></div>
 
-<script type="module" src="app.js?v=20261025col"></script>
+<script type="module" src="app.js?v=20261026meta"></script>
 </body>
 </html>

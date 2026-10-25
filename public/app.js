@@ -6,7 +6,7 @@
 // 注意：翻译函数故意导入成 tr，不是 t —— 代码里 t 是「种子对象」的惯用局部变量名
 // （createRow(t) / updateRow(el, t) / renderDetail 里的 const t = state.map.get(hash)），
 // 若叫 t 会被这些局部变量遮蔽，点到详情面板就 TypeError: t is not a function。
-import { t as tr, getLang, setLang, onLangChange, localeTag, applyDom, bootI18n } from './i18n.js?v=20261025set2';
+import { t as tr, getLang, setLang, onLangChange, localeTag, applyDom, bootI18n } from './i18n.js?v=20261026meta';
 
 /* 先把静态文案铺成目标语言，再往下跑业务逻辑 —— head 里的内联脚本已经把 body 藏住了，
    这一步在同一次任务里完成，所以不会看到中文闪一下再变英文。 */
@@ -2169,6 +2169,29 @@ function paintCoverBig() {
   else img.src = coverUrl(coverHash);
 }
 
+/**
+ * 「刮削信息 → 媒体目录」状态行。
+ * 写盘是**手动**动作：只有用户点按钮时才会去碰媒体盘，这样盘在休眠、或者服务
+ * 没有卷权限时，用户能明确看到失败原因，而不是靠后台悄悄重试。
+ */
+function renderMeta(meta) {
+  const bar = $('#metaBar');
+  const apply = $('#coverApply');
+  const remove = $('#coverMetaRemove');
+  const text = $('#metaText');
+  if (!meta) { bar.hidden = true; remove.hidden = true; return; }
+  bar.hidden = false;
+  const n = meta.count || 0;
+  text.className = `meta-text ${{ written: 'is-ok', stale: 'is-warn', error: 'is-err' }[meta.status] || ''}`.trim();
+  let label = meta.message ? tr(meta.message) : tr('尚未写入媒体目录');
+  if (meta.status === 'written' && n) label += tr('（{n} 个文件）', { n });
+  text.textContent = label;
+  text.title = meta.dir ? shortPath(meta.dir) : label;
+  // 换成自定义图 / 图标后不再有可生成的 NFO，只留「移除」
+  apply.hidden = meta.canApply === false;
+  remove.hidden = !(n > 0);
+}
+
 function afterCoverChange(hash = coverHash) {
   bumpCover(hash);
   paintCoverBig();
@@ -2176,12 +2199,15 @@ function afterCoverChange(hash = coverHash) {
   refreshMediaTitles(); // 刮削 / 放弃都可能改媒体名，列表标题跟着变
 }
 
-async function loadCoverCandidates(hash) {
+async function loadCoverCandidates(hash, opts = {}) {
   let data = null;
   try {
-    data = await fetch(`/__cover/candidates?hash=${hash}`).then((r) => r.json());
+    data = await fetch(`/__cover/candidates?hash=${hash}${opts.refresh ? '&refresh=1' : ''}`).then((r) => r.json());
   } catch { /* 下面统一处理 */ }
   if (coverHash !== hash) return; // 已经切到别的种子
+  renderMeta(data?.meta || null);
+  // 重扫之后封面可能换了（后端已作废旧缓存）：顶一下版本号让 <img> 重新取
+  if (opts.refresh) { bumpCover(hash); paintCoverBig(); }
   const grid = $('#coverGrid');
   if (!data || data.error) {
     $('#coverMode').textContent = tr('目录不可用');
@@ -2193,6 +2219,13 @@ async function loadCoverCandidates(hash) {
   state.coverMode.set(hash, data.mode);
   if (data.kind) setCoverKind(hash, data.kind);
   showCoverKind(hash, data.weights);
+  if (data.readError) {
+    // 读盘失败（超时 / 没有磁盘权限）：说清楚原因，别显示成「目录里没图」
+    $('#coverCount').textContent = tr('读取失败');
+    grid.innerHTML = `<div class="cover-empty">${esc(tr('读取这个目录失败（超时或没有磁盘访问权限）。缓存里的封面不受影响；需要重新扫描时可稍后再试。'))}</div>`;
+    paintCoverBig();
+    return;
+  }
   if (!data.dir) {
     // 单文件种子直接躺在共享下载目录里：不去扫别人的图，直接引导上传
     $('#coverMode').textContent = data.mode === 'custom' ? tr('当前：自定义图片') : tr('当前：类型图标');
@@ -2234,6 +2267,7 @@ async function openCoverModal(hash) {
   $('#tvdbGrid').innerHTML = '';
   $('#coverTvdbName').textContent = '';
   tvdbSetHint('—');
+  $('#metaBar').hidden = true; // 先收起，等这个种子的状态回来再显示
   paintCoverBig();
   openModal('coverModal');
   loadCoverCandidates(hash);
@@ -2266,6 +2300,68 @@ $('#coverAuto').addEventListener('click', async () => {
     afterCoverChange();
     toast(tr('已恢复自动封面'), 'ok');
   } catch (err) { toast(err.message, 'err'); }
+});
+
+/**
+ * 重新扫描目录。平时封面 / 类型全走缓存，一次盘都不碰；只有这里会真的去读。
+ * 后端扫完会作废这个种子的自动封面缓存，前端再顶一下版本号让 <img> 重取。
+ */
+$('#coverRescan').addEventListener('click', async (e) => {
+  if (!coverHash) return;
+  const btn = e.currentTarget;
+  if (btn.disabled) return;
+  btn.disabled = true;
+  try {
+    await loadCoverCandidates(coverHash, { refresh: true });
+    toast(tr('已重新扫描目录'), 'ok');
+  } catch (err) {
+    toast(err.message, 'err');
+  } finally {
+    btn.disabled = false;
+  }
+});
+
+/**
+ * 手动「应用到媒体目录」：把当前刮削到的海报 + NFO 写进种子自己的目录。
+ * 只有点这一下才会去读写媒体盘（盘休眠 / 没有卷权限都会把原因直接弹出来），
+ * 刮削本身只落本机缓存，不动用户的媒体库。
+ */
+$('#coverApply').addEventListener('click', async (e) => {
+  if (!coverHash) return;
+  const btn = e.currentTarget;
+  if (btn.disabled) return;
+  btn.disabled = true;
+  $('#metaText').textContent = tr('正在写入媒体目录…');
+  let out = null;
+  try {
+    out = await coverPost('/__cover/meta/apply', {});
+    if (out.ok) toast(tr('已写入媒体目录（{n} 个文件）', { n: (out.files || []).length }), 'ok');
+    else toast(tr(out.message || '写入失败'), 'err');
+  } catch (err) {
+    toast(err.message || tr('写入失败'), 'err');
+  } finally {
+    btn.disabled = false;
+    // 用接口返回的状态直接刷状态行，不再拉一次 candidates：省一次请求，也不去碰盘
+    if (out?.meta) renderMeta(out.meta);
+  }
+});
+
+$('#coverMetaRemove').addEventListener('click', async (e) => {
+  if (!coverHash) return;
+  if (!window.confirm(tr('从媒体目录删除这个种子的海报和 NFO？'))) return;
+  const btn = e.currentTarget;
+  if (btn.disabled) return;
+  btn.disabled = true;
+  let out = null;
+  try {
+    out = await coverPost('/__cover/meta/remove', {});
+    toast(tr(out.message || '已从媒体目录移除'), out.ok ? 'ok' : 'err');
+  } catch (err) {
+    toast(err.message || tr('移除失败'), 'err');
+  } finally {
+    btn.disabled = false;
+    if (out?.meta) renderMeta(out.meta);
+  }
 });
 
 $('#coverGrid').addEventListener('click', async (e) => {
