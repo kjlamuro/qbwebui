@@ -12,6 +12,7 @@
  */
 
 import http from 'node:http';
+import { execSync } from 'node:child_process';
 import { readFile, writeFile, stat } from 'node:fs/promises';
 import { createReadStream } from 'node:fs';
 import path from 'node:path';
@@ -359,6 +360,68 @@ if (process.argv.includes('--check')) {
     process.exit(1);
   }
 }
+
+/** 列出占用指定端口的进程，供启动失败时直接告诉用户该关谁 */
+function portOwners(port) {
+  try {
+    const out = execSync(`lsof -nP -iTCP:${port} -sTCP:LISTEN`, {
+      encoding: 'utf8',
+      stdio: ['ignore', 'pipe', 'ignore'],
+    });
+    return out
+      .trim()
+      .split('\n')
+      .slice(1) // 跳过表头
+      .map((line) => line.split(/\s+/))
+      .filter((cols) => cols.length >= 2)
+      .map((cols) => ({ command: cols[0], pid: cols[1] }));
+  } catch {
+    return []; // lsof 无结果时以非零码退出，视为查不到
+  }
+}
+
+server.on('error', (err) => {
+  if (err && err.code === 'EADDRINUSE') {
+    const port = config.port;
+    const owners = portOwners(port);
+    console.error('');
+    console.error(`[qBWebUI] 启动失败：端口 ${port} 已被占用`);
+    if (owners.length) {
+      console.error('[qBWebUI] 占用该端口的进程：');
+      for (const o of owners) console.error(`           PID ${o.pid}  ${o.command}`);
+      console.error(`[qBWebUI] 结束它：kill ${owners[0].pid}`);
+    } else {
+      console.error(`[qBWebUI] 未能识别占用进程，手动查看：lsof -nP -iTCP:${port} -sTCP:LISTEN`);
+    }
+    console.error(`[qBWebUI] 或换个端口启动：PORT=${port + 1} node server.mjs`);
+    console.error(`[qBWebUI] 也可修改 config.json 里的 "port"`);
+    console.error('');
+  } else if (err && err.code === 'EACCES') {
+    console.error('');
+    console.error(`[qBWebUI] 启动失败：没有权限绑定端口 ${config.port}`);
+    console.error('[qBWebUI] 1024 以下端口需要 root，建议改用 1024 以上端口');
+    console.error('');
+  } else {
+    console.error('[qBWebUI] 服务启动失败:', err);
+  }
+  process.exit(1);
+});
+
+// 兜底日志：任何未捕获异常都先落盘，避免进程无声消失后无从排查
+process.on('uncaughtException', (err) => {
+  console.error('[qBWebUI] 未捕获异常:', err);
+  process.exit(1);
+});
+process.on('unhandledRejection', (reason) => {
+  console.error('[qBWebUI] 未处理的 Promise 拒绝:', reason);
+});
+
+// 关闭终端窗口会向本进程发 SIGHUP。Node 默认直接退出且不写任何日志（曾因此出现
+// 「服务无声消失」），而且 nohup 挡不住——Node 启动时会重置信号处理，把 nohup 的
+// SIGHUP 忽略覆盖掉。这里显式接管，让服务在窗口关闭后继续跑。
+process.on('SIGHUP', () => {
+  console.log('[qBWebUI] 终端会话已结束（SIGHUP），服务继续运行。停止请用 stop.command');
+});
 
 server.listen(config.port, '0.0.0.0', () => {
   const lan = lanAddresses();
