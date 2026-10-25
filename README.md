@@ -257,6 +257,12 @@ npm run i18n         # 仅检查每条界面文案是否具备英文译文
 
 > A lightweight, self-hosted web UI for qBittorrent — responsive for desktop and mobile, zero runtime dependencies, no build step, and a bilingual (Chinese / English) interface. Full English documentation: [README.en.md](README.en.md).
 
+## 商标与标识
+
+`qBittorrent` 的名称与官方标识归 qBittorrent 项目所有。本项目的图标为独立绘制：仅借用其品牌蓝（`#2F67BA`）作为色系线索，`qb` 字母以圆角几何笔画自绘，未使用官方任何 SVG 资产。
+
+之所以不直接引用官方标识，有两个原因：其一，官方标识文件 `src/icons/skin/qbittorrent-tray.svg` 以 LGPL 发布，而本项目为 MIT，直接引入会造成许可证冲突；其二，把他人的产品标识用作自家产品图标属于商标性使用，会暗示官方背书。若 qBittorrent 项目认为本图标存在混淆风险，可随时更换。
+
 ## 许可证
 
 [MIT](LICENSE)。本项目与 qBittorrent 官方无关，仅为第三方客户端。

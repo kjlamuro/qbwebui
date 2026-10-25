@@ -234,6 +234,12 @@ There is no bundling step for the front-end: edit `public/` and refresh. The scr
 - RSS, search plugins, rate-limit scheduling and other niche panels from qBittorrent's native interface are not included
 - Sub-path deployment (for example `https://example.com/qb/`) is not supported yet
 
+## Trademarks
+
+The `qBittorrent` name and its official marks belong to the qBittorrent project. The icon of this project is drawn independently: it borrows only the brand blue (`#2F67BA`) as a colour cue, and the `qb` letters are constructed from rounded geometric strokes. No official SVG asset is used.
+
+There are two reasons for not reusing the official mark. First, the official logo file `src/icons/skin/qbittorrent-tray.svg` is released under the LGPL while this project is MIT, so bundling it would create a licence conflict. Second, using another product's mark as your own application icon is trademark use and implies endorsement. Should the qBittorrent project consider this icon confusing, it can be replaced at any time.
+
 ## License
 
 [MIT](LICENSE). Not affiliated with qBittorrent; this is a third-party client.
