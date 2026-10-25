@@ -17,7 +17,8 @@
      更新不可靠，靠 URL 变化强制绕过旧缓存。sw.js 的 SHELL 列表也要同步。 -->
 <link rel="stylesheet" href="styles.css?v=20261025col" />
 <link rel="manifest" href="manifest.webmanifest" />
-<link rel="apple-touch-icon" href="icon-180.png" />
+<!-- ?v= 同样用于破缓存：Safari 按 URL 缓存 apple-touch-icon，改图标不换 URL 会一直读到旧图 -->
+<link rel="apple-touch-icon" href="icon-180.png?v=20261025ico" />
 <meta name="apple-mobile-web-app-title" content="qBWebUI" />
 <!-- 用 default（不是 black-translucent）。两种几何的真机读数：
        · default            → 视口 873、env(top) 0、网页从状态栏**下方**开始、底部贴屏幕底

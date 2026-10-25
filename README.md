@@ -239,11 +239,14 @@ docs/en/                文档截图（英文界面）
 npm run demo         # 基于模拟数据运行界面，前端调试无需连接真实 qBittorrent
 npm run shots        # 重新生成 docs/ 中的截图（需本机安装 Chrome / Chromium）
 npm run shots:en     # 重新生成 docs/en/ 中的英文界面截图
+npm run icons        # 由 public/icon.svg 重新生成三份 PNG 图标（需本机安装 Chrome）
 npm run check        # 语法检查 + 词典覆盖率检查
 npm run i18n         # 仅检查每条界面文案是否具备英文译文
 ```
 
 前端无打包步骤，修改 `public/` 后刷新即可生效。截图脚本基于 Chrome DevTools Protocol 实现，自行启动一个临时无头实例、按脚本执行点击序列后截图，因此「打开详情抽屉」「检索海报」等界面状态同样可复现。
+
+图标位图请勿手工另存：iOS 的 `apple-touch-icon` 必须满幅不透明（iOS 自己会套圆角遮罩，自带圆角会在四角露出白底），manifest 的 `any` 版本保留自绘圆角，Android 的 `maskable` 版本还要把图案收进中间安全区。三者处理方式不同，统一由 `npm run icons` 生成。
 
 ## 已知限制
 

@@ -6,6 +6,9 @@
     是以圆角几何笔画独立绘制的，没有引用官方 SVG 资产。官方标识
     src/icons/skin/qbittorrent-tray.svg 以 LGPL 发布，本项目为 MIT，直接引入会
     造成许可证冲突；同时把官方标识用作自家产品图标会构成商标性使用、暗示背书。
+
+    改动后跑 `npm run icons` 重新生成三份位图（iOS 用满幅、manifest 用圆角、
+    maskable 用安全区），不要手工另存 PNG —— 三者处理方式不同，手改必错。
   -->
   <defs>
     <linearGradient id="g" x1="0" y1="0" x2="1" y2="1">
