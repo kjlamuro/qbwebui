@@ -50,7 +50,24 @@ node server.mjs        # 或 npm start
 局域网访问 http://192.168.x.x:7788   ← 移动端使用此地址
 ```
 
-macOS 下也可直接双击 `start.command`（将自动打开浏览器）。
+macOS 下也可直接双击 `start.command`：服务在后台启动，浏览器自动打开，启动完成后终端窗口可以直接关闭。要停止请双击 `stop.command`。
+
+### 后台运行与开机自启
+
+macOS 下有两种方式，按需选择：
+
+| 方式 | 优点 | 局限 |
+|---|---|---|
+| `start.command` | 双击即用，日志写入 `~/Library/Logs/qbwebui.log` | 进程崩了不会自动重启 |
+| `install-autostart.command` | 开机自启、崩溃 10 秒内自动重启、完全脱离终端 | 需执行一次安装 |
+
+> **为什么仅靠 `nohup` 不够**：Node 启动时会重置信号处理，把 `nohup` 设置的 SIGHUP 忽略覆盖掉，所以 `nohup node server.mjs &` 在关闭终端时依然会被带走，而且不留任何日志。`server.mjs` 中显式注册了 `SIGHUP` 处理，才能真正挡住关窗口。这也是服务"无声消失"最隐蔽的原因。
+
+安装开机自启后，卸载命令：
+
+```bash
+launchctl bootout gui/$(id -u)/com.kjlamuro.qbwebui
+```
 
 ### 仅预览界面
 
