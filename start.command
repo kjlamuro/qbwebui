@@ -43,6 +43,10 @@ LOCKFILE="$LOGDIR/qbwebui-${PORT}.lock"
 # 真正的兜底是 server.mjs 里的看门狗。
 export UV_THREADPOOL_SIZE="${UV_THREADPOOL_SIZE:-8}"
 
+# 看门狗发现线程池卡死时会自己 spawn 一个接班人。告诉它日志写到同一个文件，
+# 否则接班进程的输出会跑到默认位置，出问题两头找日志。
+export QBWEBUI_LOG="${QBWEBUI_LOG:-$LOG}"
+
 port_busy() { lsof -nP -iTCP:"$PORT" -sTCP:LISTEN >/dev/null 2>&1; }
 open_ui() { [ "${QBWEBUI_NO_OPEN:-}" = "1" ] || open "$URL" 2>/dev/null; }
 

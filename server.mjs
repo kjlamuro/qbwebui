@@ -12,9 +12,9 @@
  */
 
 import http from 'node:http';
-import { execSync } from 'node:child_process';
+import { execSync, spawn } from 'node:child_process';
 import { readFile, writeFile, stat } from 'node:fs/promises';
-import { createReadStream } from 'node:fs';
+import { createReadStream, openSync } from 'node:fs';
 import path from 'node:path';
 import os from 'node:os';
 import { fileURLToPath } from 'node:url';
@@ -402,7 +402,16 @@ function portOwners(port) {
   }
 }
 
+let portRetries = 0; // 接班进程撞端口时的退让次数
+
 server.on('error', (err) => {
+  // 看门狗自我重启时，上一代进程可能还没完全释放端口。接班的进程先退让几次，
+  // 否则会「刚拉起来就撞端口退出」，等于没重启。
+  if (err && err.code === 'EADDRINUSE' && process.env.QBWEBUI_RESPAWNED === '1' && portRetries < 5) {
+    portRetries += 1;
+    setTimeout(startListening, 500 * portRetries);
+    return;
+  }
   if (err && err.code === 'EADDRINUSE') {
     const port = config.port;
     const owners = portOwners(port);
@@ -445,16 +454,21 @@ process.on('SIGHUP', () => {
   console.log('[qBWebUI] 终端会话已结束（SIGHUP），服务继续运行。停止请用 stop.command');
 });
 
-server.listen(config.port, '0.0.0.0', () => {
-  const lan = lanAddresses();
-  speedlog.start();
-  console.log('');
-  console.log('  qBWebUI 已启动');
-  console.log(`  本机   http://127.0.0.1:${config.port}`);
-  for (const ip of lan) console.log(`  局域网 http://${ip}:${config.port}`);
-  console.log(`  上游   ${config.target}`);
-  console.log('');
-});
+// 单独抽出来是为了让「接班的进程撞端口时退让重试」能再调一次（见 server.on('error')）
+function startListening() {
+  server.listen(config.port, '0.0.0.0', () => {
+    const lan = lanAddresses();
+    speedlog.start();
+    console.log('');
+    console.log('  qBWebUI 已启动');
+    console.log(`  本机   http://127.0.0.1:${config.port}`);
+    for (const ip of lan) console.log(`  局域网 http://${ip}:${config.port}`);
+    console.log(`  上游   ${config.target}`);
+    console.log('');
+  });
+}
+
+startListening();
 
 /* ── 线程池看门狗 ──────────────────────────────────────────────
  * libuv 的线程池只有 4 个线程，所有 fs 操作共用它。外置硬盘掉速、休眠唤醒、
@@ -463,8 +477,14 @@ server.listen(config.port, '0.0.0.0', () => {
  * 采样请求全部无限排队：进程还在、端口还在监听，但一个响应都发不出来。
  * （2026-10-26 06:32 那次就是这样挂的，日志里一个字都没有，最后只能 SIGKILL。）
  *
- * 这种事在应用层救不回来，能做的只有「尽快发现 → 果断退出 → 交给 launchd
- * 重启」。探针用的就是走线程池的 fs.stat，最能直接反映线程池死活。
+ * 这种事在应用层救不回来，能做的只有「尽快发现 → 果断退出 → 有人接班」。
+ * 探针用的就是走线程池的 fs.stat，最能直接反映线程池死活。
+ *
+ * 接班的人有两种：
+ *   - launchd 托管时（plist 里带 QBWEBUI_SUPERVISED=1）：退出即可，KeepAlive 会拉起；
+ *   - start.command / 手工启动时：没有守护进程，退出就等于服务没了。这时自己
+ *     spawn 一个接班人再退。踩过这个坑：2026-10-26 18:40 看门狗按「交给 launchd
+ *     重启」退出，而当时是 start.command 起的，服务直接躺了 11 小时没人管。
  */
 const startedAt = Date.now();
 const WATCHDOG = {
@@ -473,7 +493,46 @@ const WATCHDOG = {
   strikes: 3, // 连续 3 次（约 9 秒）都不响应才动手，避免偶发慢 IO 被误杀
   // 启动 2 分钟内不查：缓存冷的时候外置盘本来就慢
   warmupMs: Number(process.env.QBWEBUI_WATCHDOG_WARMUP_MS ?? 120000),
+  // 连续自我重启的上限：文件系统要是持续病态，重启救不回来，别无限循环
+  maxRespawns: 5,
 };
+
+const SUPERVISED = process.env.QBWEBUI_SUPERVISED === '1';
+
+/** 拉起一个接班的自己（脱离当前进程组，日志仍写同一个文件） */
+function respawnSelf() {
+  const logFile = process.env.QBWEBUI_LOG
+    || path.join(os.homedir(), 'Library', 'Logs', 'qbwebui.log');
+  let out = 'ignore';
+  try {
+    out = openSync(logFile, 'a');
+  } catch { /* 打不开日志就丢弃输出，至少服务还在 */ }
+
+  // 连续重启计数：跑够 10 分钟算这一次已经稳了，重新计数
+  const previous = Number(process.env.QBWEBUI_RESPAWNS || 0);
+  const stable = Date.now() - startedAt > 10 * 60_000;
+  const count = stable ? 1 : previous + 1;
+  if (count > WATCHDOG.maxRespawns) {
+    console.error(`[qBWebUI] 已连续自我重启 ${previous} 次，文件系统看起来持续异常，不再重启。`);
+    console.error('[qBWebUI] 请检查外置硬盘状态后手动启动（双击 start.command）。');
+    return false;
+  }
+
+  try {
+    const child = spawn(process.execPath, process.argv.slice(1), {
+      cwd: ROOT,
+      detached: true,
+      stdio: ['ignore', out, out],
+      env: { ...process.env, QBWEBUI_RESPAWNED: '1', QBWEBUI_RESPAWNS: String(count) },
+    });
+    child.unref();
+    console.error(`[qBWebUI] 已拉起接班进程（PID ${child.pid}，第 ${count} 次自我重启）。`);
+    return true;
+  } catch (err) {
+    console.error('[qBWebUI] 拉起接班进程失败:', err);
+    return false;
+  }
+}
 
 let fsStrikes = 0;
 
@@ -502,7 +561,12 @@ if (WATCHDOG.intervalMs > 0) {
     }
     console.error('');
     console.error('[qBWebUI] 线程池已被卡死：文件系统连续多次无响应，服务实际已不可用。');
-    console.error('[qBWebUI] 主动退出，交给 launchd 重启（外置硬盘掉速 / 休眠唤醒常见原因）。');
+    if (SUPERVISED) {
+      console.error('[qBWebUI] 主动退出，交给 launchd 重启（外置硬盘掉速 / 休眠唤醒常见原因）。');
+    } else {
+      console.error('[qBWebUI] 没有 launchd 守护，自己拉起接班进程（外置硬盘掉速 / 休眠唤醒常见原因）。');
+      respawnSelf();
+    }
     console.error('');
     // 不能用 process.exit：退出钩子里的写盘同样会卡死。SIGKILL 才能保证真的退出去。
     process.kill(process.pid, 'SIGKILL');

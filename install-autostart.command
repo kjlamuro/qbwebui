@@ -52,6 +52,11 @@ cat > "$PLIST" <<PLIST_EOF
          open() 就能把 4 个全拖住，连静态文件都发不出去。 -->
     <key>UV_THREADPOOL_SIZE</key>
     <string>8</string>
+    <!-- 告诉 server.mjs「有人守护」：看门狗发现线程池卡死时直接退出，
+         由 KeepAlive 拉起。不设这个变量它会自己 spawn 接班人，
+         两者同时发生就会出现两个进程抢端口。 -->
+    <key>QBWEBUI_SUPERVISED</key>
+    <string>1</string>
   </dict>
   <key>RunAtLoad</key>
   <true/>
