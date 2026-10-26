@@ -6,7 +6,7 @@
 // 注意：翻译函数故意导入成 tr，不是 t —— 代码里 t 是「种子对象」的惯用局部变量名
 // （createRow(t) / updateRow(el, t) / renderDetail 里的 const t = state.map.get(hash)），
 // 若叫 t 会被这些局部变量遮蔽，点到详情面板就 TypeError: t is not a function。
-import { t as tr, getLang, setLang, onLangChange, localeTag, applyDom, bootI18n } from './i18n.js?v=20261026meta';
+import { t as tr, getLang, setLang, onLangChange, localeTag, applyDom, bootI18n } from './i18n.js?v=20261026prev';
 
 /* 先把静态文案铺成目标语言，再往下跑业务逻辑 —— head 里的内联脚本已经把 body 藏住了，
    这一步在同一次任务里完成，所以不会看到中文闪一下再变英文。 */
@@ -1357,6 +1357,26 @@ function openMediaViewer(kind, startName = '') {
   viewerEl.focus({ preventScroll: true });
 }
 
+/**
+ * 预览失败自动重试一次。
+ *
+ * 外置盘睡着时，第一个请求要先把盘从停转唤醒，这一步常常比服务端愿意等的更久，
+ * 浏览器于是拿到 504 —— 对 <img>/<video> 来说这只是「加载失败」。可盘一旦转起来，
+ * 同一个请求几百毫秒就完成了。所以先悄悄重试一次，别急着告诉用户「放不了」。
+ *
+ * 返回 true 表示「重试已经排上了」，调用方不要再显示兜底提示。
+ */
+function withRetry(el, url) {
+  if (el.dataset.retried === '1') return false;
+  el.dataset.retried = '1';
+  setTimeout(() => {
+    if (!el.isConnected) return;
+    // 带上时间戳，绕开浏览器可能对失败请求留下的缓存
+    el.src = `${url}&t=${Date.now()}`;
+  }, 1200);
+  return true;
+}
+
 function renderViewer() {
   if (!viewerEl || !viewerState) return;
   const { kind, files, idx } = viewerState;
@@ -1395,9 +1415,6 @@ function renderViewer() {
     el.playsInline = true;
     el.preload = 'metadata';
     el.src = url;
-    el.addEventListener('error', () => {
-      if (el.isConnected) viewerFallback(tr('浏览器无法直接播放这个视频。MKV / HEVC / 杜比视界等格式通常需要转码，可以下载后用本地播放器打开。'));
-    });
     // 缓冲提示：一开始就显示，能播后消失；中途卡顿再出现
     const buffering = document.createElement('div');
     buffering.className = 'mv-buffering is-on';
@@ -1405,6 +1422,14 @@ function renderViewer() {
     stage.appendChild(buffering);
     const showBuf = () => buffering.classList.add('is-on');
     const hideBuf = () => buffering.classList.remove('is-on');
+    el.addEventListener('error', () => {
+      if (!el.isConnected) return;
+      if (withRetry(el, url)) {
+        showBuf();
+        return;
+      }
+      viewerFallback(tr('浏览器无法直接播放这个视频。MKV / HEVC / 杜比视界等格式通常需要转码，可以下载后用本地播放器打开。'));
+    });
     el.addEventListener('canplay', hideBuf);
     el.addEventListener('playing', hideBuf);
     el.addEventListener('waiting', showBuf);
@@ -1415,7 +1440,9 @@ function renderViewer() {
     el.autoplay = true;
     el.src = url;
     el.addEventListener('error', () => {
-      if (el.isConnected) viewerFallback(tr('浏览器无法播放这个音频，可能还没下载完成，或编码不受支持。'));
+      if (!el.isConnected) return;
+      if (withRetry(el, url)) return;
+      viewerFallback(tr('浏览器无法播放这个音频，可能还没下载完成，或编码不受支持。'));
     });
   } else {
     const wrap = document.createElement('div');
@@ -1432,7 +1459,13 @@ function renderViewer() {
       if (viewerState?.zoom) { clampZoom(); applyZoom(); }
     });
     el.addEventListener('error', () => {
-      if (el.isConnected) viewerFallback(tr('这张图片无法显示：可能还没下载完，或浏览器不支持该格式（例如 HEIC）。可以下载后用本地应用打开。'));
+      if (!el.isConnected) return;
+      if (withRetry(el, url)) {
+        // 盘正在转起来：保持 loading 态，别先画一个「无法显示」出来
+        stage.classList.add('is-loading');
+        return;
+      }
+      viewerFallback(tr('这张图片无法显示：可能还没下载完，或浏览器不支持该格式（例如 HEIC）。可以下载后用本地应用打开。'));
     });
     stage.appendChild(wrap);
     applyZoom();

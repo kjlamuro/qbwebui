@@ -15,7 +15,7 @@
 <link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'><defs><linearGradient id='g' x1='0' y1='0' x2='1' y2='1'><stop offset='0' stop-color='%232F67BA'/><stop offset='1' stop-color='%234E8FE0'/></linearGradient></defs><rect width='32' height='32' rx='7.25' fill='url(%23g)'/><g stroke='%23fff' stroke-linecap='round' stroke-linejoin='round' fill='none'><path d='M16 4.75v7.75M12 9.5l4 3.375 4-3.375' stroke-width='2.13'/><circle cx='12' cy='22.75' r='2.13' stroke-width='1.5'/><path d='M14.13 22.75v4.25' stroke-width='1.5'/><path d='M17.63 17.13v5.62' stroke-width='1.5'/><circle cx='19.75' cy='22.75' r='2.13' stroke-width='1.5'/></g></svg>" />
 <!-- ?v= 是资源版本号：改 styles.css / app.js 必须同步改这里，iOS PWA 的 Service Worker
      更新不可靠，靠 URL 变化强制绕过旧缓存。sw.js 的 SHELL 列表也要同步。 -->
-<link rel="stylesheet" href="styles.css?v=20261026meta" />
+<link rel="stylesheet" href="styles.css?v=20261026prev" />
 <link rel="manifest" href="manifest.webmanifest" />
 <!-- ?v= 同样用于破缓存：Safari 按 URL 缓存 apple-touch-icon，改图标不换 URL 会一直读到旧图 -->
 <link rel="apple-touch-icon" href="icon-180.png?v=20261025ico" />
@@ -687,6 +687,6 @@
 
 <div class="toasts" id="toasts"></div>
 
-<script type="module" src="app.js?v=20261026meta"></script>
+<script type="module" src="app.js?v=20261026prev"></script>
 </body>
 </html>
